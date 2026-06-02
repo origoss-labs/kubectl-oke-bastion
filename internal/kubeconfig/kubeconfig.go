@@ -96,15 +96,13 @@ func endpointHost(server string) (string, error) {
 	return host, nil
 }
 
-// execArg returns the value following flag in an oci exec credential's args,
-// supporting both "--flag value" and "--flag=value" forms.
+// execArg returns the value following flag in an oci exec credential's args.
+// `oci ce cluster create-kubeconfig` always emits the separated "--flag value"
+// form, which is the only form handled here.
 func execArg(args []string, flag string) string {
 	for i, a := range args {
 		if a == flag && i+1 < len(args) {
 			return args[i+1]
-		}
-		if len(a) > len(flag)+1 && a[:len(flag)+1] == flag+"=" {
-			return a[len(flag)+1:]
 		}
 	}
 	return ""

@@ -33,44 +33,6 @@ users:
       - eu-frankfurt-1
 `
 
-// Same cluster, but the oci exec args use the --flag=value form.
-const okeKubeconfigEqualsForm = `apiVersion: v1
-kind: Config
-current-context: ctx-abc
-clusters:
-- name: cluster-abc
-  cluster:
-    server: https://10.0.0.6:6443
-    certificate-authority-data: ZmFrZS1jYQ==
-contexts:
-- name: ctx-abc
-  context:
-    cluster: cluster-abc
-    user: user-abc
-users:
-- name: user-abc
-  user:
-    exec:
-      apiVersion: client.authentication.k8s.io/v1beta1
-      command: oci
-      args:
-      - ce
-      - cluster
-      - generate-token
-      - --cluster-id=ocid1.cluster.oc1.eu-frankfurt-1.aaaa
-      - --region=eu-frankfurt-1
-`
-
-func TestParse_EqualsFormFlags(t *testing.T) {
-	got, err := Parse([]byte(okeKubeconfigEqualsForm))
-	if err != nil {
-		t.Fatalf("Parse returned error: %v", err)
-	}
-	if got.ClusterOCID != "ocid1.cluster.oc1.eu-frankfurt-1.aaaa" || got.Region != "eu-frankfurt-1" {
-		t.Errorf("equals-form not parsed: got OCID=%q region=%q", got.ClusterOCID, got.Region)
-	}
-}
-
 func TestParse_NoCurrentContext(t *testing.T) {
 	const noCurrent = `apiVersion: v1
 kind: Config
