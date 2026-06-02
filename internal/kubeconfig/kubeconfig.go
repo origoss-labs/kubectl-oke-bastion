@@ -25,7 +25,7 @@ type ClusterInfo struct {
 func Parse(raw []byte) (ClusterInfo, error) {
 	cfg, err := clientcmd.Load(raw)
 	if err != nil {
-		return ClusterInfo{}, err
+		return ClusterInfo{}, fmt.Errorf("parsing kubeconfig: %w", err)
 	}
 	return clusterFromConfig(cfg)
 }
@@ -36,7 +36,7 @@ func Parse(raw []byte) (ClusterInfo, error) {
 func Current() (ClusterInfo, error) {
 	cfg, err := clientcmd.NewDefaultClientConfigLoadingRules().Load()
 	if err != nil {
-		return ClusterInfo{}, err
+		return ClusterInfo{}, fmt.Errorf("loading kubeconfig: %w", err)
 	}
 	return clusterFromConfig(cfg)
 }
@@ -46,21 +46,33 @@ func clusterFromConfig(cfg *clientcmdapi.Config) (ClusterInfo, error) {
 	if ctxName == "" {
 		return ClusterInfo{}, fmt.Errorf("kubeconfig has no current-context set; select one with `kubectl config use-context`")
 	}
-	kctx := cfg.Contexts[ctxName]
-	cluster := cfg.Clusters[kctx.Cluster]
-	user := cfg.AuthInfos[kctx.AuthInfo]
+	kctx, ok := cfg.Contexts[ctxName]
+	if !ok {
+		return ClusterInfo{}, fmt.Errorf("kubeconfig current-context %q is not defined in contexts", ctxName)
+	}
+	cluster, ok := cfg.Clusters[kctx.Cluster]
+	if !ok {
+		return ClusterInfo{}, fmt.Errorf("context %q references unknown cluster %q", ctxName, kctx.Cluster)
+	}
+	user, ok := cfg.AuthInfos[kctx.AuthInfo]
+	if !ok {
+		return ClusterInfo{}, fmt.Errorf("context %q references unknown user %q", ctxName, kctx.AuthInfo)
+	}
 
 	host, err := endpointHost(cluster.Server)
 	if err != nil {
 		return ClusterInfo{}, err
 	}
-	if user.Exec == nil {
+	if user.Exec == nil || user.Exec.Command != "oci" {
 		return ClusterInfo{}, fmt.Errorf("current context %q is not an OKE cluster: no oci exec credential found", ctxName)
 	}
 	ocid := execArg(user.Exec.Args, "--cluster-id")
 	region := execArg(user.Exec.Args, "--region")
 	if ocid == "" {
 		return ClusterInfo{}, fmt.Errorf("current context %q is not an OKE cluster: oci exec credential has no --cluster-id", ctxName)
+	}
+	if region == "" {
+		return ClusterInfo{}, fmt.Errorf("current context %q oci exec credential has no --region", ctxName)
 	}
 
 	return ClusterInfo{

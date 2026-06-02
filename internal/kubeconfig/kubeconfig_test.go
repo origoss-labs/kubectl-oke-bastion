@@ -146,6 +146,100 @@ users:
 	}
 }
 
+func TestParse_DanglingReferences(t *testing.T) {
+	cases := map[string]string{
+		"current-context names missing context": `apiVersion: v1
+kind: Config
+current-context: ghost
+clusters:
+- name: cluster-abc
+  cluster:
+    server: https://10.0.0.6:6443
+`,
+		"context references missing cluster": `apiVersion: v1
+kind: Config
+current-context: ctx-abc
+contexts:
+- name: ctx-abc
+  context:
+    cluster: ghost-cluster
+    user: user-abc
+`,
+		"context references missing user": `apiVersion: v1
+kind: Config
+current-context: ctx-abc
+clusters:
+- name: cluster-abc
+  cluster:
+    server: https://10.0.0.6:6443
+contexts:
+- name: ctx-abc
+  context:
+    cluster: cluster-abc
+    user: ghost-user
+`,
+	}
+	for name, raw := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Parse([]byte(raw)); err == nil {
+				t.Fatalf("expected an error, got nil")
+			}
+		})
+	}
+}
+
+func TestParse_NonOCIExecCredential(t *testing.T) {
+	// A valid exec credential that is not the oci OKE token plugin, even though
+	// it happens to carry a --cluster-id flag.
+	const gkeStyle = `apiVersion: v1
+kind: Config
+current-context: ctx-abc
+clusters:
+- name: cluster-abc
+  cluster:
+    server: https://10.0.0.6:6443
+contexts:
+- name: ctx-abc
+  context:
+    cluster: cluster-abc
+    user: user-abc
+users:
+- name: user-abc
+  user:
+    exec:
+      command: gke-gcloud-auth-plugin
+      args: [--cluster-id, not-an-ocid]
+`
+	if _, err := Parse([]byte(gkeStyle)); err == nil {
+		t.Fatal("expected an error for a non-oci exec credential, got nil")
+	}
+}
+
+func TestParse_MissingRegion(t *testing.T) {
+	const noRegion = `apiVersion: v1
+kind: Config
+current-context: ctx-abc
+clusters:
+- name: cluster-abc
+  cluster:
+    server: https://10.0.0.6:6443
+contexts:
+- name: ctx-abc
+  context:
+    cluster: cluster-abc
+    user: user-abc
+users:
+- name: user-abc
+  user:
+    exec:
+      command: oci
+      args: [ce, cluster, generate-token, --cluster-id, ocid1.cluster.oc1.eu-frankfurt-1.aaaa]
+`
+	if _, err := Parse([]byte(noRegion)); err == nil {
+		t.Fatal("expected an error when --region is absent, got nil")
+	}
+}
+
 func TestParse_OKEContext(t *testing.T) {
 	got, err := Parse([]byte(okeKubeconfig))
 	if err != nil {
