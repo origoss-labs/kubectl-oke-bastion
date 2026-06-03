@@ -1,6 +1,154 @@
 package kubeconfig
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+
+	"k8s.io/client-go/tools/clientcmd"
+)
+
+func TestAddBastionContext_LeavesOriginalUntouched(t *testing.T) {
+	cfg, err := clientcmd.Load([]byte(okeKubeconfig))
+	if err != nil {
+		t.Fatalf("loading fixture: %v", err)
+	}
+	origCluster := *cfg.Clusters["cluster-abc"]
+	origCtx := *cfg.Contexts["ctx-abc"]
+	origUser := *cfg.AuthInfos["user-abc"]
+	origCurrent := cfg.CurrentContext
+
+	if _, err := AddBastionContext(cfg, BastionWiring{
+		OriginalContext: "ctx-abc",
+		PrivateEndpoint: "10.0.0.6",
+		LocalPort:       18443,
+	}); err != nil {
+		t.Fatalf("AddBastionContext returned error: %v", err)
+	}
+
+	if !reflect.DeepEqual(origCluster, *cfg.Clusters["cluster-abc"]) {
+		t.Error("original cluster entry was mutated")
+	}
+	if !reflect.DeepEqual(origCtx, *cfg.Contexts["ctx-abc"]) {
+		t.Error("original context entry was mutated")
+	}
+	if !reflect.DeepEqual(origUser, *cfg.AuthInfos["user-abc"]) {
+		t.Error("original user entry was mutated")
+	}
+	if cfg.CurrentContext != origCurrent {
+		t.Errorf("current-context changed to %q, want %q untouched", cfg.CurrentContext, origCurrent)
+	}
+}
+
+func TestRemoveBastionContext_RestoresPreAddState(t *testing.T) {
+	cfg, err := clientcmd.Load([]byte(okeKubeconfig))
+	if err != nil {
+		t.Fatalf("loading fixture: %v", err)
+	}
+	before, err := clientcmd.Write(*cfg)
+	if err != nil {
+		t.Fatalf("serializing pre-add config: %v", err)
+	}
+
+	name, err := AddBastionContext(cfg, BastionWiring{
+		OriginalContext: "ctx-abc",
+		PrivateEndpoint: "10.0.0.6",
+		LocalPort:       18443,
+	})
+	if err != nil {
+		t.Fatalf("AddBastionContext returned error: %v", err)
+	}
+	if err := RemoveBastionContext(cfg, name); err != nil {
+		t.Fatalf("RemoveBastionContext returned error: %v", err)
+	}
+
+	after, err := clientcmd.Write(*cfg)
+	if err != nil {
+		t.Fatalf("serializing post-remove config: %v", err)
+	}
+	if string(after) != string(before) {
+		t.Errorf("config after add+remove differs from original:\n--- before ---\n%s\n--- after ---\n%s", before, after)
+	}
+}
+
+func TestAddBastionContext_OverwritesStaleLeftover(t *testing.T) {
+	cfg, err := clientcmd.Load([]byte(okeKubeconfig))
+	if err != nil {
+		t.Fatalf("loading fixture: %v", err)
+	}
+	// A crash left a -bastion entry pointing at a now-dead port.
+	if _, err := AddBastionContext(cfg, BastionWiring{
+		OriginalContext: "ctx-abc", PrivateEndpoint: "10.0.0.6", LocalPort: 11111,
+	}); err != nil {
+		t.Fatalf("seeding stale entry: %v", err)
+	}
+
+	name, err := AddBastionContext(cfg, BastionWiring{
+		OriginalContext: "ctx-abc", PrivateEndpoint: "10.0.0.6", LocalPort: 22222,
+	})
+	if err != nil {
+		t.Fatalf("AddBastionContext returned error: %v", err)
+	}
+	cl := cfg.Clusters[cfg.Contexts[name].Cluster]
+	if cl.Server != "https://127.0.0.1:22222" {
+		t.Errorf("stale entry not overwritten: Server = %q, want fresh port", cl.Server)
+	}
+}
+
+func TestAddBastionContext_UnknownContext(t *testing.T) {
+	cfg, err := clientcmd.Load([]byte(okeKubeconfig))
+	if err != nil {
+		t.Fatalf("loading fixture: %v", err)
+	}
+	if _, err := AddBastionContext(cfg, BastionWiring{
+		OriginalContext: "ghost", PrivateEndpoint: "10.0.0.6", LocalPort: 18443,
+	}); err == nil {
+		t.Fatal("expected an error for an unknown original context, got nil")
+	}
+}
+
+func TestAddBastionContext_WiresLocalEndpoint(t *testing.T) {
+	cfg, err := clientcmd.Load([]byte(okeKubeconfig))
+	if err != nil {
+		t.Fatalf("loading fixture: %v", err)
+	}
+
+	name, err := AddBastionContext(cfg, BastionWiring{
+		OriginalContext: "ctx-abc",
+		PrivateEndpoint: "10.0.0.6",
+		LocalPort:       18443,
+	})
+	if err != nil {
+		t.Fatalf("AddBastionContext returned error: %v", err)
+	}
+	if name != "ctx-abc-bastion" {
+		t.Errorf("returned context name = %q, want %q", name, "ctx-abc-bastion")
+	}
+
+	kctx, ok := cfg.Contexts[name]
+	if !ok {
+		t.Fatalf("config has no %q context", name)
+	}
+	if kctx.AuthInfo != "user-abc" {
+		t.Errorf("bastion context AuthInfo = %q, want original user %q", kctx.AuthInfo, "user-abc")
+	}
+
+	cl, ok := cfg.Clusters[kctx.Cluster]
+	if !ok {
+		t.Fatalf("bastion context references unknown cluster %q", kctx.Cluster)
+	}
+	if cl.Server != "https://127.0.0.1:18443" {
+		t.Errorf("bastion cluster Server = %q, want %q", cl.Server, "https://127.0.0.1:18443")
+	}
+	if cl.TLSServerName != "10.0.0.6" {
+		t.Errorf("bastion cluster TLSServerName = %q, want %q", cl.TLSServerName, "10.0.0.6")
+	}
+
+	orig := cfg.Clusters["cluster-abc"]
+	if string(cl.CertificateAuthorityData) != string(orig.CertificateAuthorityData) {
+		t.Errorf("bastion cluster CA = %q, want reused original CA %q",
+			cl.CertificateAuthorityData, orig.CertificateAuthorityData)
+	}
+}
 
 // A realistic OKE kubeconfig as produced by
 // `oci ce cluster create-kubeconfig --token-version 2.0.0`.

@@ -84,6 +84,100 @@ func clusterFromConfig(cfg *clientcmdapi.Config) (ClusterInfo, error) {
 	}, nil
 }
 
+// BastionWiring describes the non-destructive -bastion entry to wire into a
+// kubeconfig: which existing context to shadow, the private endpoint the
+// cluster certificate is issued for (used as tls-server-name), and the local
+// port the tunnel listens on.
+type BastionWiring struct {
+	OriginalContext string
+	PrivateEndpoint string
+	LocalPort       int
+}
+
+// AddBastionContext adds a -bastion cluster+context to cfg pointing kubectl at
+// the local end of the tunnel (https://127.0.0.1:<port>) while validating TLS
+// against the real cluster CA via tls-server-name (ADR-0005). The original
+// context's cluster CA is reused and its user (the oci exec credential) is
+// referenced unchanged, so the -bastion context still authenticates. Returns
+// the new context's name.
+func AddBastionContext(cfg *clientcmdapi.Config, w BastionWiring) (string, error) {
+	kctx, ok := cfg.Contexts[w.OriginalContext]
+	if !ok {
+		return "", fmt.Errorf("original context %q is not defined in contexts", w.OriginalContext)
+	}
+	orig, ok := cfg.Clusters[kctx.Cluster]
+	if !ok {
+		return "", fmt.Errorf("context %q references unknown cluster %q", w.OriginalContext, kctx.Cluster)
+	}
+
+	clusterName := kctx.Cluster + "-bastion"
+	ctxName := w.OriginalContext + "-bastion"
+
+	bastionCluster := clientcmdapi.NewCluster()
+	bastionCluster.Server = fmt.Sprintf("https://127.0.0.1:%d", w.LocalPort)
+	bastionCluster.TLSServerName = w.PrivateEndpoint
+	bastionCluster.CertificateAuthorityData = orig.CertificateAuthorityData
+	cfg.Clusters[clusterName] = bastionCluster
+
+	bastionCtx := clientcmdapi.NewContext()
+	bastionCtx.Cluster = clusterName
+	bastionCtx.AuthInfo = kctx.AuthInfo
+	cfg.Contexts[ctxName] = bastionCtx
+
+	return ctxName, nil
+}
+
+// WireBastion loads the operator's active kubeconfig (honoring KUBECONFIG and
+// the default path), adds the -bastion context, and persists the change with an
+// atomic write via clientcmd. The original file's other entries are preserved.
+// Returns the new context's name.
+func WireBastion(w BastionWiring) (string, error) {
+	pathOpts := clientcmd.NewDefaultPathOptions()
+	cfg, err := pathOpts.GetStartingConfig()
+	if err != nil {
+		return "", fmt.Errorf("loading kubeconfig: %w", err)
+	}
+	name, err := AddBastionContext(cfg, w)
+	if err != nil {
+		return "", err
+	}
+	if err := clientcmd.ModifyConfig(pathOpts, *cfg, false); err != nil {
+		return "", fmt.Errorf("writing -bastion context to kubeconfig: %w", err)
+	}
+	return name, nil
+}
+
+// UnwireBastion loads the active kubeconfig and removes the -bastion context
+// named ctxName, persisting the change. It is a no-op if the context is absent,
+// so teardown is safe to run unconditionally.
+func UnwireBastion(ctxName string) error {
+	pathOpts := clientcmd.NewDefaultPathOptions()
+	cfg, err := pathOpts.GetStartingConfig()
+	if err != nil {
+		return fmt.Errorf("loading kubeconfig: %w", err)
+	}
+	if err := RemoveBastionContext(cfg, ctxName); err != nil {
+		return err
+	}
+	if err := clientcmd.ModifyConfig(pathOpts, *cfg, false); err != nil {
+		return fmt.Errorf("removing -bastion context from kubeconfig: %w", err)
+	}
+	return nil
+}
+
+// RemoveBastionContext removes the -bastion context named ctxName and the
+// cluster it references, restoring the kubeconfig to its pre-Add state. It is a
+// no-op if the context is absent, so teardown is safe to run unconditionally.
+func RemoveBastionContext(cfg *clientcmdapi.Config, ctxName string) error {
+	kctx, ok := cfg.Contexts[ctxName]
+	if !ok {
+		return nil
+	}
+	delete(cfg.Clusters, kctx.Cluster)
+	delete(cfg.Contexts, ctxName)
+	return nil
+}
+
 // endpointHost returns the host (IP) portion of a cluster server URL.
 func endpointHost(server string) (string, error) {
 	u, err := url.Parse(server)
