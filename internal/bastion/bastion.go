@@ -17,12 +17,23 @@ type Handle struct {
 	State string
 }
 
+// NewClient builds an OCI bastion client from a configuration provider. It is
+// the single place the SDK constructor is wrapped, shared by Get and by the
+// session lifecycle.
+func NewClient(cp common.ConfigurationProvider) (ocibastion.BastionClient, error) {
+	client, err := ocibastion.NewBastionClientWithConfigurationProvider(cp)
+	if err != nil {
+		return ocibastion.BastionClient{}, fmt.Errorf("creating bastion client: %w", err)
+	}
+	return client, nil
+}
+
 // Get proves the credentials work by calling GetBastion, returning the
 // bastion's name and lifecycle state.
 func Get(ctx context.Context, cp common.ConfigurationProvider, id string) (Handle, error) {
-	client, err := ocibastion.NewBastionClientWithConfigurationProvider(cp)
+	client, err := NewClient(cp)
 	if err != nil {
-		return Handle{}, fmt.Errorf("creating bastion client: %w", err)
+		return Handle{}, err
 	}
 	resp, err := client.GetBastion(ctx, ocibastion.GetBastionRequest{BastionId: &id})
 	if err != nil {
