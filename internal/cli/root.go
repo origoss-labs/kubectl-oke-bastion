@@ -20,12 +20,13 @@ func NewRootCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			out := cmd.OutOrStdout()
-			fmt.Fprintf(out, "context:          %s\n", info.ContextName)
-			fmt.Fprintf(out, "private endpoint: %s\n", info.PrivateEndpoint)
-			fmt.Fprintf(out, "cluster OCID:     %s\n", info.ClusterOCID)
-			fmt.Fprintf(out, "region:           %s\n", info.Region)
-			return nil
+			_, err = fmt.Fprintf(cmd.OutOrStdout(),
+				"context:          %s\n"+
+					"private endpoint: %s\n"+
+					"cluster OCID:     %s\n"+
+					"region:           %s\n",
+				info.ContextName, info.PrivateEndpoint, info.ClusterOCID, info.Region)
+			return err
 		},
 	}
 }

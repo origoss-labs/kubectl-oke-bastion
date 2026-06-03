@@ -11,3 +11,4 @@ hard to reverse, surprising without context, or the result of a real trade-off.
 | [0004](0004-manage-sessions-require-existing-bastion.md) | Manage sessions only; require a pre-existing Bastion |
 | [0005](0005-non-destructive-kubeconfig-bastion-context.md) | Wire the tunnel via a separate kubeconfig context with tls-server-name |
 | [0006](0006-reactive-recreate-proactive-deferred.md) | Reactive recreate for v1; proactive rotation deferred |
+| [0008](0008-nix-system-hooks-toolchain.md) | Provide the dev/CI toolchain from a Nix flake; pre-commit hooks run as system hooks |
