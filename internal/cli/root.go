@@ -11,7 +11,12 @@ import (
 	"github.com/origoss-labs/kubectl-oke-bastion/internal/bastion"
 	"github.com/origoss-labs/kubectl-oke-bastion/internal/kubeconfig"
 	"github.com/origoss-labs/kubectl-oke-bastion/internal/ociauth"
+	"github.com/origoss-labs/kubectl-oke-bastion/internal/session"
+	"github.com/origoss-labs/kubectl-oke-bastion/internal/sshkey"
 )
+
+// k8sAPIPort is the OKE private API endpoint port the session forwards to.
+const k8sAPIPort = 6443
 
 // NewRootCmd builds the root command, invoked as `kubectl oke bastion`.
 func NewRootCmd() *cobra.Command {
@@ -49,19 +54,64 @@ func NewRootCmd() *cobra.Command {
 				return err
 			}
 
-			// Cluster facts are informational continuity from cluster discovery;
-			// a missing OKE context must not fail the bastion proof above.
+			// The session targets the cluster's private endpoint, so cluster
+			// facts are now a hard requirement, not informational continuity.
 			info, err := kubeconfig.Current()
 			if err != nil {
-				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "note: cluster info unavailable: %v\n", err)
-				return nil
+				return err
 			}
-			_, err = fmt.Fprintf(out,
+			if _, err := fmt.Fprintf(out,
 				"context:          %s\n"+
 					"private endpoint: %s\n"+
 					"cluster OCID:     %s\n"+
 					"region:           %s\n",
-				info.ContextName, info.PrivateEndpoint, info.ClusterOCID, info.Region)
+				info.ContextName, info.PrivateEndpoint, info.ClusterOCID, info.Region); err != nil {
+				return err
+			}
+
+			// Mint the ephemeral key and bring a port-forwarding session to the
+			// private API endpoint up to ACTIVE. Slice 3 proves the lifecycle
+			// end-to-end; it opens no tunnel and deletes the session on exit.
+			key, err := sshkey.Generate()
+			if err != nil {
+				return err
+			}
+			client, err := bastion.NewClient(provider)
+			if err != nil {
+				return err
+			}
+
+			sessCtx, sessCancel := context.WithTimeout(cmd.Context(), 5*time.Minute)
+			defer sessCancel()
+			sess, err := session.Open(sessCtx, client, session.Params{
+				BastionID:        bastionID,
+				Target:           session.Target{PrivateIP: info.PrivateEndpoint, Port: k8sAPIPort},
+				PublicKeyOpenSSH: key.PublicKeyOpenSSH,
+			})
+			if err != nil {
+				return err
+			}
+			// Delete the session on exit using a fresh context, since sessCtx
+			// may already be spent by the time we tear down.
+			defer func() {
+				delCtx, delCancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer delCancel()
+				if cerr := sess.Close(delCtx); cerr != nil {
+					_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: deleting session: %v\n", cerr)
+				}
+			}()
+
+			if _, err := fmt.Fprintf(out,
+				"session:          %s (ACTIVE)\n"+
+					"ssh user:         %s\n",
+				sess.ID, sess.Username); err != nil {
+				return err
+			}
+			sshCmd := sess.SSHMeta["command"]
+			if sshCmd == "" {
+				return nil
+			}
+			_, err = fmt.Fprintf(out, "ssh command:      %s\n", sshCmd)
 			return err
 		},
 	}
