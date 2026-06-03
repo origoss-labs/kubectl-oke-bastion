@@ -14,8 +14,16 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// dialTimeout bounds the initial SSH handshake to the bastion host.
+// dialTimeout bounds a single SSH handshake to the bastion host.
 const dialTimeout = 30 * time.Second
+
+// A session can report ACTIVE a few seconds before its key propagates to the
+// bastion SSH frontend; until it does, publickey auth is rejected. dialRetryFor
+// bounds how long Open retries the handshake to ride out that window.
+const (
+	dialRetryFor      = 30 * time.Second
+	dialRetryInterval = 2 * time.Second
+)
 
 // Params is everything Open needs to bring up the forward.
 type Params struct {
@@ -58,9 +66,9 @@ func Open(p Params) (*Tunnel, error) {
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 	}
 
-	client, err := ssh.Dial("tcp", p.BastionHost, cfg)
+	client, err := dialWithRetry(p.BastionHost, cfg)
 	if err != nil {
-		return nil, fmt.Errorf("dialing bastion %s: %w", p.BastionHost, err)
+		return nil, err
 	}
 
 	addr := fmt.Sprintf("127.0.0.1:%d", p.LocalPort)
@@ -77,6 +85,23 @@ func Open(p Params) (*Tunnel, error) {
 	}
 	go t.serve(p.Target)
 	return t, nil
+}
+
+// dialWithRetry handshakes with the bastion, retrying until dialRetryFor
+// elapses to absorb the gap between a session going ACTIVE and its key becoming
+// usable. The last error is returned if the window expires.
+func dialWithRetry(addr string, cfg *ssh.ClientConfig) (*ssh.Client, error) {
+	deadline := time.Now().Add(dialRetryFor)
+	for {
+		client, err := ssh.Dial("tcp", addr, cfg)
+		if err == nil {
+			return client, nil
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("dialing bastion %s: %w", addr, err)
+		}
+		time.Sleep(dialRetryInterval)
+	}
 }
 
 // serve accepts loopback connections and forwards each through the session.
