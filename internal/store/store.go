@@ -70,17 +70,43 @@ func (s *Store) load() (map[string]string, error) {
 	return m, nil
 }
 
-// save writes the mapping back to the file.
+// save writes the mapping back to the file. It writes to a temp file in the
+// same dir and renames it into place so a crash mid-write can never leave a
+// truncated file behind — a torn write would otherwise trip load's corrupt-file
+// path and lock the user out of every mapping, not just the one being changed.
+//
+// Concurrent writers are not locked: two processes mapping different clusters
+// at once can still lose one update (last rename wins). That is accepted —
+// invocations are one-tunnel-per-cluster and the mapping is disposable plumbing,
+// not a security boundary.
 func (s *Store) save(m map[string]string) error {
 	raw, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encoding bastion store: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
+	dir := filepath.Dir(s.path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("creating bastion store dir: %w", err)
 	}
-	if err := os.WriteFile(s.path, raw, 0o600); err != nil {
-		return fmt.Errorf("writing bastion store %s: %w", s.path, err)
+	tmp, err := os.CreateTemp(dir, ".bastions-*.json")
+	if err != nil {
+		return fmt.Errorf("creating bastion store temp file: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }() // no-op once the rename succeeds
+	if _, err := tmp.Write(raw); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("writing bastion store temp file: %w", err)
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("setting bastion store permissions: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("closing bastion store temp file: %w", err)
+	}
+	if err := os.Rename(tmpName, s.path); err != nil {
+		return fmt.Errorf("replacing bastion store %s: %w", s.path, err)
 	}
 	return nil
 }

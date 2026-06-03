@@ -2,6 +2,7 @@ package cli
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/origoss-labs/kubectl-oke-bastion/internal/store"
@@ -67,7 +68,12 @@ func TestResolveBastion_FlagOverridesStore(t *testing.T) {
 
 func TestResolveBastion_ErrorsWhenNeitherFlagNorStore(t *testing.T) {
 	s := tempStore(t)
-	if _, err := resolveBastion(s, clusterA, ""); err == nil {
+	_, err := resolveBastion(s, clusterA, "")
+	if err == nil {
 		t.Fatal("expected an error when no flag and no stored mapping, got nil")
+	}
+	// The error must name the cluster so the operator knows which one to map.
+	if !strings.Contains(err.Error(), clusterA) {
+		t.Errorf("error %q does not name the cluster %q", err, clusterA)
 	}
 }

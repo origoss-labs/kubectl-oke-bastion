@@ -191,15 +191,19 @@ func NewRootCmd() *cobra.Command {
 // later runs need not repeat it; an empty flag falls back to the stored
 // mapping. It errors when neither a flag nor a stored mapping is available.
 func resolveBastion(s *store.Store, clusterOCID, flag string) (string, error) {
-	if flag != "" {
-		if err := s.Put(clusterOCID, flag); err != nil {
-			return "", err
-		}
-		return flag, nil
-	}
 	id, ok, err := s.Get(clusterOCID)
 	if err != nil {
 		return "", err
+	}
+	if flag != "" {
+		// Persist only when the mapping actually changes, so the common
+		// repeat-run case doesn't rewrite the file on every invocation.
+		if flag != id {
+			if err := s.Put(clusterOCID, flag); err != nil {
+				return "", err
+			}
+		}
+		return flag, nil
 	}
 	if !ok {
 		return "", fmt.Errorf("no bastion known for cluster %s: supply one once with --bastion-id <OCID>", clusterOCID)
