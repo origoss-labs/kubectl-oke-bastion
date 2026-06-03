@@ -74,10 +74,10 @@ func Open(ctx context.Context, p Params) (*Tunnel, error) {
 	}
 
 	addr := fmt.Sprintf("127.0.0.1:%d", p.LocalPort)
-	ln, err := net.Listen("tcp", addr)
+	ln, err := listenWithRetry(ctx, addr)
 	if err != nil {
 		_ = client.Close()
-		return nil, fmt.Errorf("listening on %s: %w", addr, err)
+		return nil, err
 	}
 
 	t := &Tunnel{
@@ -87,6 +87,32 @@ func Open(ctx context.Context, p Params) (*Tunnel, error) {
 	}
 	go t.serve(p.Target)
 	return t, nil
+}
+
+// listenRetryFor bounds how long listenWithRetry retries binding the loopback
+// port. On a redial the supervisor reuses the prior port immediately after
+// closing the old listener; the kernel can hold it briefly, so a short retry
+// stops a benign rebind race from escalating into a tunnel teardown.
+const listenRetryFor = 2 * time.Second
+
+// listenWithRetry binds the loopback listener, retrying a momentarily-held port
+// until listenRetryFor elapses or ctx is cancelled.
+func listenWithRetry(ctx context.Context, addr string) (net.Listener, error) {
+	deadline := time.Now().Add(listenRetryFor)
+	for {
+		ln, err := net.Listen("tcp", addr)
+		if err == nil {
+			return ln, nil
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("listening on %s: %w", addr, err)
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(dialRetryInterval):
+		}
+	}
 }
 
 // dialWithRetry handshakes with the bastion, retrying until dialRetryFor
@@ -141,6 +167,23 @@ func (t *Tunnel) forward(local net.Conn, target string) {
 	go cp(remote, local)
 	go cp(local, remote)
 	<-done
+}
+
+// Wait blocks until the SSH transport closes (a break — dropped connection or a
+// session that ended) or ctx is cancelled. It returns ctx.Err() on cancel and
+// the transport-close reason on a break. The reason is informational: the
+// supervisor distinguishes break from cancel by checking ctx itself. The
+// client.Wait goroutine unblocks when Close shuts the transport, so it does not
+// outlive the tunnel.
+func (t *Tunnel) Wait(ctx context.Context) error {
+	closed := make(chan error, 1)
+	go func() { closed <- t.client.Wait() }()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-closed:
+		return err
+	}
 }
 
 // Close stops accepting new connections and closes the SSH transport, which

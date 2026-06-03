@@ -166,6 +166,33 @@ func TestOpen_PollsUntilActive(t *testing.T) {
 	}
 }
 
+func TestAlive_TrueWhileActive(t *testing.T) {
+	fake := &fakeClient{states: []ocibastion.SessionLifecycleStateEnum{ocibastion.SessionLifecycleStateActive}}
+	s, err := Open(context.Background(), fake, testParams())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if !s.Alive(context.Background()) {
+		t.Error("Alive = false for an ACTIVE session, want true")
+	}
+}
+
+func TestAlive_FalseWhenSessionGone(t *testing.T) {
+	// ACTIVE for Open, then DELETED on the next read: a session that expired or
+	// was torn down out from under us.
+	fake := &fakeClient{states: []ocibastion.SessionLifecycleStateEnum{
+		ocibastion.SessionLifecycleStateActive,
+		ocibastion.SessionLifecycleStateDeleted,
+	}}
+	s, err := Open(context.Background(), fake, testParams())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if s.Alive(context.Background()) {
+		t.Error("Alive = true for a DELETED session, want false")
+	}
+}
+
 func TestClose_DeletesSession(t *testing.T) {
 	fake := &fakeClient{states: []ocibastion.SessionLifecycleStateEnum{ocibastion.SessionLifecycleStateActive}}
 	s, err := Open(context.Background(), fake, testParams())
