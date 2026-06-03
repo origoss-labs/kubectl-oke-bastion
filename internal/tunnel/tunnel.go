@@ -143,6 +143,23 @@ func (t *Tunnel) forward(local net.Conn, target string) {
 	<-done
 }
 
+// Wait blocks until the SSH transport closes (a break — dropped connection or a
+// session that ended) or ctx is cancelled. It returns ctx.Err() on cancel and
+// the transport-close reason on a break. The reason is informational: the
+// supervisor distinguishes break from cancel by checking ctx itself. The
+// client.Wait goroutine unblocks when Close shuts the transport, so it does not
+// outlive the tunnel.
+func (t *Tunnel) Wait(ctx context.Context) error {
+	closed := make(chan error, 1)
+	go func() { closed <- t.client.Wait() }()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-closed:
+		return err
+	}
+}
+
 // Close stops accepting new connections and closes the SSH transport, which
 // drops any in-flight forwarded connections.
 func (t *Tunnel) Close() error {

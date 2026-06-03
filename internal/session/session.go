@@ -134,6 +134,18 @@ func waitActive(ctx context.Context, c BastionClient, id string, interval time.D
 	}
 }
 
+// Alive reports whether the session is still ACTIVE in OCI. A read error or any
+// non-ACTIVE state (expired, deleted, failed) reports false, so the supervisor
+// treats an unreachable or gone session as needing recreation rather than a
+// bare redial.
+func (s *Session) Alive(ctx context.Context) bool {
+	got, err := s.client.GetSession(ctx, ocibastion.GetSessionRequest{SessionId: &s.ID})
+	if err != nil {
+		return false
+	}
+	return got.LifecycleState == ocibastion.SessionLifecycleStateActive
+}
+
 // Close deletes the session.
 func (s *Session) Close(ctx context.Context) error {
 	if _, err := s.client.DeleteSession(ctx, ocibastion.DeleteSessionRequest{SessionId: &s.ID}); err != nil {

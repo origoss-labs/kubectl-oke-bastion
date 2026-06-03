@@ -3,6 +3,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/signal"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"github.com/origoss-labs/kubectl-oke-bastion/internal/session"
 	"github.com/origoss-labs/kubectl-oke-bastion/internal/sshkey"
 	"github.com/origoss-labs/kubectl-oke-bastion/internal/store"
+	"github.com/origoss-labs/kubectl-oke-bastion/internal/supervisor"
 	"github.com/origoss-labs/kubectl-oke-bastion/internal/tunnel"
 )
 
@@ -83,9 +85,10 @@ func NewRootCmd() *cobra.Command {
 				return err
 			}
 
-			// Mint the ephemeral key and bring a port-forwarding session to the
-			// private API endpoint up to ACTIVE. Slice 3 proves the lifecycle
-			// end-to-end; it opens no tunnel and deletes the session on exit.
+			// The supervisor owns the session+tunnel lifecycle for the duration
+			// of this invocation: it brings the tunnel up, holds it in the
+			// foreground, rebuilds it on a break (redial) or session expiry
+			// (recreate), and tears everything down on exit (ADR-0003, ADR-0006).
 			key, err := sshkey.Generate()
 			if err != nil {
 				return err
@@ -95,83 +98,32 @@ func NewRootCmd() *cobra.Command {
 				return err
 			}
 
-			sessCtx, sessCancel := context.WithTimeout(cmd.Context(), 5*time.Minute)
-			defer sessCancel()
-			sess, err := session.Open(sessCtx, client, session.Params{
-				BastionID:        bastionID,
-				Target:           session.Target{PrivateIP: info.PrivateEndpoint, Port: k8sAPIPort},
-				PublicKeyOpenSSH: key.PublicKeyOpenSSH,
-			})
-			if err != nil {
-				return err
-			}
-			// Delete the session on exit using a fresh context, since sessCtx
-			// may already be spent by the time we tear down.
-			defer func() {
-				delCtx, delCancel := context.WithTimeout(context.Background(), 30*time.Second)
-				defer delCancel()
-				if cerr := sess.Close(delCtx); cerr != nil {
-					_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: deleting session: %v\n", cerr)
-				}
-			}()
-
+			bastionCtxName := info.ContextName + "-bastion"
 			if _, err := fmt.Fprintf(out,
-				"session:          %s (ACTIVE)\n", sess.ID); err != nil {
+				"\nbringing up tunnel — when active, use:  kubectl --context %s get nodes\n"+
+					"Ctrl-C to tear down.\n\n", bastionCtxName); err != nil {
 				return err
 			}
 
-			// Open the in-process SSH forward through the ACTIVE session to the
-			// private API endpoint. The bastion SSH host and user come from the
-			// session's ssh-metadata command.
-			bastionHost, sshUser, err := parseBastionSSH(sess.SSHMeta["command"])
-			if err != nil {
-				return err
+			builder := &liveBuilder{
+				client:     client,
+				key:        key,
+				bastionID:  bastionID,
+				target:     session.Target{PrivateIP: info.PrivateEndpoint, Port: k8sAPIPort},
+				dialTo:     fmt.Sprintf("%s:%d", info.PrivateEndpoint, k8sAPIPort),
+				pinnedPort: localPort,
 			}
-			tun, err := tunnel.Open(cmd.Context(), tunnel.Params{
-				BastionHost: bastionHost,
-				User:        sshUser,
-				Signer:      key.Signer,
-				Target:      fmt.Sprintf("%s:%d", info.PrivateEndpoint, k8sAPIPort),
-				LocalPort:   localPort,
-			})
-			if err != nil {
-				return err
-			}
-			defer func() { _ = tun.Close() }()
-
-			// Wire the non-destructive -bastion context at the resolved local
-			// port, and remove it on exit before the tunnel and session go.
-			bastionCtx, err := kubeconfig.WireBastion(kubeconfig.BastionWiring{
-				OriginalContext: info.ContextName,
-				PrivateEndpoint: info.PrivateEndpoint,
-				LocalPort:       tun.LocalPort,
-			})
-			if err != nil {
-				return err
-			}
-			defer func() {
-				if uerr := kubeconfig.UnwireBastion(bastionCtx); uerr != nil {
-					_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: removing -bastion context: %v\n", uerr)
-				}
-			}()
-
-			if _, err := fmt.Fprintf(out,
-				"tunnel:           127.0.0.1:%d → %s:%d\n"+
-					"context:          %s\n\n"+
-					"use:  kubectl --context %s get nodes\n"+
-					"Ctrl-C to tear down.\n",
-				tun.LocalPort, info.PrivateEndpoint, k8sAPIPort,
-				bastionCtx, bastionCtx); err != nil {
-				return err
+			wiring := &liveWiring{
+				originalContext: info.ContextName,
+				privateEndpoint: info.PrivateEndpoint,
 			}
 
-			// Hold in the foreground until interrupted; the deferred teardown
-			// then removes the context, closes the tunnel, and deletes the
-			// session (in that order).
-			holdCtx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
+			runCtx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
-			<-holdCtx.Done()
-			_, _ = fmt.Fprintln(out, "\ntearing down…")
+			if rerr := supervisor.Run(runCtx, builder, wiring, out); rerr != nil && !errors.Is(rerr, context.Canceled) {
+				return rerr
+			}
+			_, _ = fmt.Fprintln(out, "torn down.")
 			return nil
 		},
 	}
@@ -209,6 +161,90 @@ func resolveBastion(s *store.Store, clusterOCID, flag string) (string, error) {
 		return "", fmt.Errorf("no bastion known for cluster %s: supply one once with --bastion-id <OCID>", clusterOCID)
 	}
 	return id, nil
+}
+
+// liveBuilder is the production supervisor.Builder: it mints sessions against a
+// real OCI bastion and opens in-process SSH forwards through them, reusing one
+// ephemeral key for the invocation.
+type liveBuilder struct {
+	client     session.BastionClient
+	key        sshkey.KeyPair
+	bastionID  string
+	target     session.Target
+	dialTo     string // <private endpoint>:6443, the tunnel's far end
+	pinnedPort int    // --local-port, or 0 to let the OS assign on first open
+}
+
+func (b *liveBuilder) NewSession(ctx context.Context) (supervisor.Session, error) {
+	return session.Open(ctx, b.client, session.Params{
+		BastionID:        b.bastionID,
+		Target:           b.target,
+		PublicKeyOpenSSH: b.key.PublicKeyOpenSSH,
+	})
+}
+
+func (b *liveBuilder) OpenTunnel(ctx context.Context, s supervisor.Session, localPort int) (supervisor.Tunnel, error) {
+	sess, ok := s.(*session.Session)
+	if !ok {
+		return nil, fmt.Errorf("supervisor passed an unexpected session type %T", s)
+	}
+	host, user, err := parseBastionSSH(sess.SSHMeta["command"])
+	if err != nil {
+		return nil, err
+	}
+	// localPort is 0 on the first open (use the pin, or let the OS choose) and
+	// the previously assigned port on every redial, keeping the local endpoint
+	// stable so the wired -bastion context stays valid across rebuilds.
+	port := localPort
+	if port == 0 {
+		port = b.pinnedPort
+	}
+	tun, err := tunnel.Open(ctx, tunnel.Params{
+		BastionHost: host,
+		User:        user,
+		Signer:      b.key.Signer,
+		Target:      b.dialTo,
+		LocalPort:   port,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return liveTunnel{tun}, nil
+}
+
+// liveTunnel adapts *tunnel.Tunnel (which exposes LocalPort as a field) to the
+// supervisor.Tunnel interface (which wants it as a method).
+type liveTunnel struct{ *tunnel.Tunnel }
+
+func (t liveTunnel) LocalPort() int { return t.Tunnel.LocalPort }
+
+// liveWiring is the production supervisor.Wiring: it adds and removes the
+// non-destructive -bastion kubeconfig context, remembering the context name
+// between Wire and Unwire.
+type liveWiring struct {
+	originalContext string
+	privateEndpoint string
+	ctxName         string
+}
+
+func (w *liveWiring) Wire(localPort int) error {
+	name, err := kubeconfig.WireBastion(kubeconfig.BastionWiring{
+		OriginalContext: w.originalContext,
+		PrivateEndpoint: w.privateEndpoint,
+		LocalPort:       localPort,
+	})
+	if err != nil {
+		return err
+	}
+	w.ctxName = name
+	return nil
+}
+
+func (w *liveWiring) Unwire() error {
+	if w.ctxName == "" {
+		return nil
+	}
+	return kubeconfig.UnwireBastion(w.ctxName)
 }
 
 // parseBastionSSH extracts the bastion SSH host (with :22) and user from a
