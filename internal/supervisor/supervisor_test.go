@@ -6,7 +6,31 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
+
+// chanWriter forwards each status write to a channel so a test can wait for a
+// specific transition before acting.
+type chanWriter struct{ lines chan string }
+
+func (c *chanWriter) Write(p []byte) (int, error) {
+	c.lines <- string(p)
+	return len(p), nil
+}
+
+func waitForLine(t *testing.T, lines <-chan string, substr string) {
+	t.Helper()
+	for {
+		select {
+		case line := <-lines:
+			if strings.Contains(line, substr) {
+				return
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for a status line containing %q", substr)
+		}
+	}
+}
 
 // fakeSession is a bastion session whose validity is scripted: alive(callIndex)
 // decides each Alive result, so a test can make a session "expire".
@@ -121,15 +145,15 @@ func (w *fakeWiring) Unwire() error {
 // the context is cancelled returns cleanly and tears everything down once.
 func TestRun_CancelTearsDownOnce(t *testing.T) {
 	sess := &fakeSession{id: "s1"}
-	tun := &fakeTunnel{port: 18443}
+	tun := &fakeTunnel{port: 18443, blocked: make(chan struct{})}
 	b := &fakeBuilder{sessions: []*fakeSession{sess}, tunnels: []*fakeTunnel{tun}}
 	w := &fakeWiring{}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- Run(ctx, b, w, &bytes.Buffer{}) }()
+	go func() { done <- Run(ctx, b, w, &bytes.Buffer{}, WithBackoff(0, 0)) }()
 
-	// Let it reach active, then cancel.
+	<-tun.blocked // wait until the tunnel is up and steady, then cancel
 	cancel()
 	if err := <-done; err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run returned %v, want nil or context.Canceled", err)
@@ -160,7 +184,7 @@ func TestRun_BreakRedialsWithoutNewSession(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- Run(ctx, b, w, &bytes.Buffer{}) }()
+	go func() { done <- Run(ctx, b, w, &bytes.Buffer{}, WithBackoff(0, 0)) }()
 	<-redialed.blocked // wait until the redial is up and steady
 	cancel()
 	<-done
@@ -194,7 +218,7 @@ func TestRun_ExpiryRecreatesSession(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- Run(ctx, b, w, &bytes.Buffer{}) }()
+	go func() { done <- Run(ctx, b, w, &bytes.Buffer{}, WithBackoff(0, 0)) }()
 	<-recreated.blocked
 	cancel()
 	<-done
@@ -221,7 +245,7 @@ func TestRun_NonRetryableTunnelErrorStops(t *testing.T) {
 	b := &fakeBuilder{sessions: []*fakeSession{sess}, openErr: blocked}
 	w := &fakeWiring{}
 
-	err := Run(context.Background(), b, w, &bytes.Buffer{})
+	err := Run(context.Background(), b, w, &bytes.Buffer{}, WithBackoff(0, 0))
 	if !errors.Is(err, blocked) {
 		t.Fatalf("Run returned %v, want the build error", err)
 	}
@@ -242,7 +266,7 @@ func TestRun_NonRetryableSessionErrorStops(t *testing.T) {
 	b := &fakeBuilder{newSessErr: down}
 	w := &fakeWiring{}
 
-	err := Run(context.Background(), b, w, &bytes.Buffer{})
+	err := Run(context.Background(), b, w, &bytes.Buffer{}, WithBackoff(0, 0))
 	if !errors.Is(err, down) {
 		t.Fatalf("Run returned %v, want the session error", err)
 	}
@@ -267,7 +291,7 @@ func TestRun_StatusReflectsTransitions(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- Run(ctx, b, w, &out) }()
+	go func() { done <- Run(ctx, b, w, &out, WithBackoff(0, 0)) }()
 	<-recreated.blocked
 	cancel()
 	<-done
@@ -276,5 +300,35 @@ func TestRun_StatusReflectsTransitions(t *testing.T) {
 		if !strings.Contains(out.String(), "["+state+"]") {
 			t.Errorf("status output missing %q state:\n%s", state, out.String())
 		}
+	}
+}
+
+// After a break the supervisor must wait out a backoff before rebuilding, and
+// a cancel during that wait must abort cleanly rather than open a new tunnel —
+// the guard against hot-spinning on an endpoint that breaks the instant it's up.
+func TestRun_BackoffGatesRebuildAndIsCancelable(t *testing.T) {
+	sess := &fakeSession{id: "s1"}
+	broken := &fakeTunnel{port: 18443, breakN: 1}
+	never := &fakeTunnel{port: 18443} // a second open would consume this
+	b := &fakeBuilder{
+		sessions: []*fakeSession{sess},
+		tunnels:  []*fakeTunnel{broken, never},
+	}
+	w := &fakeWiring{}
+	out := &chanWriter{lines: make(chan string, 16)}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	// A long backoff: once the tunnel breaks the loop parks in the backoff wait,
+	// where the cancel below must take effect before any rebuild.
+	go func() { done <- Run(ctx, b, w, out, WithBackoff(time.Hour, time.Hour)) }()
+
+	waitForLine(t, out.lines, "[reconnecting]")
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run = %v, want context.Canceled", err)
+	}
+	if len(b.openPorts) != 1 {
+		t.Errorf("OpenTunnel called %d times, want 1 (no rebuild during a cancelled backoff — no spin)", len(b.openPorts))
 	}
 }

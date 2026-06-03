@@ -55,15 +55,43 @@ type Wiring interface {
 	Unwire() error
 }
 
+// Backoff bounds how long Run waits before rebuilding after a break. It rises
+// from base, doubling each consecutive break up to max, so an endpoint that
+// accepts the handshake but drops the forward instantly (a flapping NSG, a
+// refused 6443) can't hot-spin the loop and hammer CreateSession.
+const (
+	defaultBaseBackoff = 1 * time.Second
+	defaultMaxBackoff  = 30 * time.Second
+)
+
+type options struct {
+	baseBackoff time.Duration
+	maxBackoff  time.Duration
+}
+
+// Option tunes Run. The zero-backoff option exists mainly so tests run fast.
+type Option func(*options)
+
+// WithBackoff sets the rebuild backoff floor and ceiling. base <= 0 disables
+// the wait entirely.
+func WithBackoff(base, max time.Duration) Option {
+	return func(o *options) { o.baseBackoff, o.maxBackoff = base, max }
+}
+
 // Run brings up the tunnel and holds it, self-healing on breaks and expiry,
 // until ctx is cancelled or a rebuild fails. On return it tears down exactly
 // once: removes the -bastion context, closes the tunnel, deletes the session.
-func Run(ctx context.Context, b Builder, w Wiring, out io.Writer) (err error) {
+func Run(ctx context.Context, b Builder, w Wiring, out io.Writer, opts ...Option) (err error) {
+	o := options{baseBackoff: defaultBaseBackoff, maxBackoff: defaultMaxBackoff}
+	for _, fn := range opts {
+		fn(&o)
+	}
 	var (
 		sess      Session
 		tun       Tunnel
 		localPort int
 		wired     bool
+		backoff   = o.baseBackoff
 	)
 	defer func() {
 		if wired {
@@ -119,6 +147,17 @@ func Run(ctx context.Context, b Builder, w Wiring, out io.Writer) (err error) {
 		}
 
 		status(out, "reconnecting", "tunnel broke; recovering")
+		// Wait before rebuilding so a tunnel that breaks the instant it comes up
+		// can't spin; the delay grows with each consecutive break.
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoff):
+		}
+		if backoff *= 2; backoff > o.maxBackoff {
+			backoff = o.maxBackoff
+		}
+
 		if !sess.Alive(ctx) {
 			delCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			_ = sess.Close(delCtx)
