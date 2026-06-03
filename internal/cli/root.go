@@ -16,6 +16,7 @@ import (
 	"github.com/origoss-labs/kubectl-oke-bastion/internal/ociauth"
 	"github.com/origoss-labs/kubectl-oke-bastion/internal/session"
 	"github.com/origoss-labs/kubectl-oke-bastion/internal/sshkey"
+	"github.com/origoss-labs/kubectl-oke-bastion/internal/store"
 	"github.com/origoss-labs/kubectl-oke-bastion/internal/tunnel"
 )
 
@@ -35,9 +36,6 @@ func NewRootCmd() *cobra.Command {
 		Short:        "Open and supervise an OCI Bastion tunnel to a private OKE cluster",
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if bastionID == "" {
-				return fmt.Errorf("no bastion known: supply one with --bastion-id <OCID>")
-			}
 			provider, err := ociauth.Provider(ociauth.Spec{
 				Method:  ociauth.Method(authMethod),
 				Profile: profile,
@@ -45,22 +43,10 @@ func NewRootCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-
-			// Proving the bastion is reachable with these credentials is this
-			// command's deliverable; it does not depend on a kubeconfig.
-			ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
-			defer cancel()
-			handle, err := bastion.Get(ctx, provider, bastionID)
-			if err != nil {
-				return err
-			}
 			out := cmd.OutOrStdout()
-			if _, err := fmt.Fprintf(out, "bastion:          %s (%s)\n", handle.Name, handle.State); err != nil {
-				return err
-			}
 
-			// The session targets the cluster's private endpoint, so cluster
-			// facts are now a hard requirement, not informational continuity.
+			// Cluster facts come first: the private endpoint is the session
+			// target, and the cluster OCID keys the persisted bastion mapping.
 			info, err := kubeconfig.Current()
 			if err != nil {
 				return err
@@ -71,6 +57,29 @@ func NewRootCmd() *cobra.Command {
 					"cluster OCID:     %s\n"+
 					"region:           %s\n",
 				info.ContextName, info.PrivateEndpoint, info.ClusterOCID, info.Region); err != nil {
+				return err
+			}
+
+			// Resolve the bastion for this cluster: a --bastion-id flag wins and
+			// is remembered; otherwise fall back to the stored mapping so the
+			// flag need only be supplied once (slice 6).
+			storePath, err := store.DefaultPath()
+			if err != nil {
+				return err
+			}
+			bastionID, err = resolveBastion(store.Open(storePath), info.ClusterOCID, bastionID)
+			if err != nil {
+				return err
+			}
+
+			// Prove the bastion is reachable with these credentials.
+			ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
+			defer cancel()
+			handle, err := bastion.Get(ctx, provider, bastionID)
+			if err != nil {
+				return err
+			}
+			if _, err := fmt.Fprintf(out, "bastion:          %s (%s)\n", handle.Name, handle.State); err != nil {
 				return err
 			}
 
@@ -175,6 +184,27 @@ func NewRootCmd() *cobra.Command {
 	cmd.Flags().IntVar(&localPort, "local-port", 0,
 		"local loopback port for the tunnel; 0 lets the OS assign one")
 	return cmd
+}
+
+// resolveBastion determines which bastion OCID to tunnel through for the
+// cluster identified by clusterOCID. A non-empty flag wins and is persisted so
+// later runs need not repeat it; an empty flag falls back to the stored
+// mapping. It errors when neither a flag nor a stored mapping is available.
+func resolveBastion(s *store.Store, clusterOCID, flag string) (string, error) {
+	if flag != "" {
+		if err := s.Put(clusterOCID, flag); err != nil {
+			return "", err
+		}
+		return flag, nil
+	}
+	id, ok, err := s.Get(clusterOCID)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", fmt.Errorf("no bastion known for cluster %s: supply one once with --bastion-id <OCID>", clusterOCID)
+	}
+	return id, nil
 }
 
 // parseBastionSSH extracts the bastion SSH host (with :22) and user from a
