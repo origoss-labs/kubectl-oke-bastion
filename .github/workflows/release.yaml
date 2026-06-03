@@ -1,0 +1,36 @@
+# Tag-triggered release: goreleaser cross-compiles, publishes the GitHub Release
+# (archives + checksums) and generates the krew manifest into dist/, which we
+# then validate with a local krew install (ADR-0008). krew-index submission is
+# a separate manual PR.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: DeterminateSystems/nix-installer-action@v22
+      - uses: nix-community/cache-nix-action@v7
+        with:
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('.flakes/flake.lock') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-
+      - name: goreleaser release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: nix develop ./.flakes -c goreleaser release --clean
+      - name: validate krew manifest
+        run: |
+          nix develop ./.flakes -c bash -c '
+            export KREW_ROOT="$(mktemp -d)"
+            archive="$(ls dist/kubectl-oke-bastion_*_linux_amd64.tar.gz)"
+            krew install --manifest=dist/krew/oke-bastion.yaml --archive="$archive"
+          '

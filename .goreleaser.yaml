@@ -1,0 +1,61 @@
+# goreleaser v2 — single source of truth for cross-platform build + release + krew
+# manifest (ADR-0008). CI compile-checks with `goreleaser build --snapshot`;
+# tags run `goreleaser release`. crypto/ssh + OCI SDK are pure Go, so CGO is off.
+version: 2
+
+project_name: kubectl-oke-bastion
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: kubectl-oke-bastion
+    binary: kubectl-oke-bastion
+    main: .
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+
+archives:
+  - id: default
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+# Generate + validate the krew manifest; submission to kubernetes-sigs/krew-index
+# stays a manual one-time PR (ADR-0008 scope). skip_upload keeps the manifest in
+# dist/ rather than pushing to an index repo.
+krews:
+  - name: oke-bastion
+    skip_upload: true
+    repository:
+      owner: origoss-labs
+      name: krew-index
+    homepage: https://github.com/origoss-labs/kubectl-oke-bastion
+    description: |
+      Open and supervise an OCI Bastion SSH port-forward tunnel to a private
+      OKE cluster's Kubernetes API endpoint. Reconnects on break and recreates
+      the session on the 3-hour TTL so kubectl keeps working.
+    short_description: Supervised OCI Bastion tunnel to a private OKE API endpoint.
+
+release:
+  github:
+    owner: origoss-labs
+    name: kubectl-oke-bastion
+
+changelog:
+  use: github
+  sort: asc

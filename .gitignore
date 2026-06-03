@@ -30,3 +30,16 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# built binary
+/kubectl-oke-bastion
+
+# direnv / nix
+.direnv/
+
+# goreleaser
+/dist/
+
+# nix build result symlinks
+result
+result-*

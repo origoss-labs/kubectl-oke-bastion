@@ -1,0 +1,7 @@
+# golangci-lint v2. errcheck, govet, ineffassign, staticcheck, unused are on by
+# default; add the curated extras (ADR-0008 — whitespace also covers file hygiene).
+version: "2"
+linters:
+  enable:
+    - misspell
+    - whitespace

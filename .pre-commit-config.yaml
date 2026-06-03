@@ -1,0 +1,31 @@
+# All hooks are local system hooks — they call the Nix-provided binary on PATH
+# (ADR-0008). Activate the shell first: `direnv allow` or `nix develop ./.flakes`.
+# CI runs the identical command: `nix develop ./.flakes -c pre-commit run --all-files`.
+repos:
+  - repo: local
+    hooks:
+      - id: gofumpt
+        name: gofumpt
+        entry: gofumpt -l -w
+        language: system
+        types: [go]
+
+      - id: golangci-lint
+        name: golangci-lint
+        entry: golangci-lint run --fix
+        language: system
+        types: [go]
+        pass_filenames: false
+
+      - id: go-mod-tidy
+        name: go mod tidy
+        entry: bash -c 'go mod tidy && git diff --exit-code -- go.mod go.sum'
+        language: system
+        pass_filenames: false
+        files: '(\.go$|go\.mod$|go\.sum$)'
+
+      - id: yamllint
+        name: yamllint
+        entry: yamllint --strict
+        language: system
+        types: [yaml]
