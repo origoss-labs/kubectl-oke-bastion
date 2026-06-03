@@ -59,6 +59,34 @@ func TestProvider_APIKeyPropagatesProfile(t *testing.T) {
 	}
 }
 
+func TestProfileOrDefault(t *testing.T) {
+	if got := profileOrDefault(""); got != "DEFAULT" {
+		t.Errorf("profileOrDefault(\"\") = %q, want %q", got, "DEFAULT")
+	}
+	if got := profileOrDefault("PRODUCTION"); got != "PRODUCTION" {
+		t.Errorf("profileOrDefault(\"PRODUCTION\") = %q, want %q", got, "PRODUCTION")
+	}
+}
+
+// TestRealBuilders_EmptyProfile exercises the real (non-spy) builders for the
+// config-file methods with the CLI's default empty profile. Both must return a
+// usable provider with no error; instance_principal is excluded because its
+// constructor reaches the live instance metadata endpoint.
+func TestRealBuilders_EmptyProfile(t *testing.T) {
+	cases := map[Method]string{APIKey: "api_key", SecurityToken: "security_token"}
+	for method := range cases {
+		t.Run(string(method), func(t *testing.T) {
+			cp, err := realBuilders.provider(Spec{Method: method})
+			if err != nil {
+				t.Fatalf("realBuilders.provider(%q) returned error: %v", method, err)
+			}
+			if cp == nil {
+				t.Fatalf("realBuilders.provider(%q) returned a nil provider", method)
+			}
+		})
+	}
+}
+
 func TestProvider_UnknownMethodErrors(t *testing.T) {
 	var fired, profile string
 	b := spyBuilders(&fired, &profile)

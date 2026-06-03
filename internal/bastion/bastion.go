@@ -28,6 +28,9 @@ func Get(ctx context.Context, cp common.ConfigurationProvider, id string) (Handl
 	if err != nil {
 		return Handle{}, fmt.Errorf("getting bastion %s: %w", id, err)
 	}
+	if resp.Name == nil {
+		return Handle{}, fmt.Errorf("getting bastion %s: response carried no name", id)
+	}
 	return Handle{
 		ID:    id,
 		Name:  *resp.Name,

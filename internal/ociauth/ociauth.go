@@ -55,6 +55,16 @@ func (b builders) provider(spec Spec) (common.ConfigurationProvider, error) {
 	}
 }
 
+// profileOrDefault maps an empty profile to OCI's DEFAULT profile. The
+// session-token provider, unlike the api_key one, has no built-in DEFAULT
+// fallback, so an empty profile would otherwise resolve no section at all.
+func profileOrDefault(profile string) string {
+	if profile == "" {
+		return "DEFAULT"
+	}
+	return profile
+}
+
 var realBuilders = builders{
 	apiKey: func(profile string) (common.ConfigurationProvider, error) {
 		if profile == "" {
@@ -63,7 +73,7 @@ var realBuilders = builders{
 		return common.CustomProfileConfigProvider("", profile), nil
 	},
 	securityToken: func(profile string) (common.ConfigurationProvider, error) {
-		return common.CustomProfileSessionTokenConfigProvider("", profile), nil
+		return common.CustomProfileSessionTokenConfigProvider("", profileOrDefault(profile)), nil
 	},
 	instancePrincipal: func() (common.ConfigurationProvider, error) {
 		return auth.InstancePrincipalConfigurationProvider()

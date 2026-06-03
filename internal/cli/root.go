@@ -2,7 +2,9 @@
 package cli
 
 import (
+	"context"
 	"fmt"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -23,6 +25,9 @@ func NewRootCmd() *cobra.Command {
 		Short:        "Open and supervise an OCI Bastion tunnel to a private OKE cluster",
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if bastionID == "" {
+				return fmt.Errorf("no bastion known: supply one with --bastion-id <OCID>")
+			}
 			provider, err := ociauth.Provider(ociauth.Spec{
 				Method:  ociauth.Method(authMethod),
 				Profile: profile,
@@ -30,15 +35,14 @@ func NewRootCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if bastionID == "" {
-				return fmt.Errorf("no bastion known: supply one with --bastion-id <OCID>")
-			}
 
 			info, err := kubeconfig.Current()
 			if err != nil {
 				return err
 			}
-			handle, err := bastion.Get(cmd.Context(), provider, bastionID)
+			ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
+			defer cancel()
+			handle, err := bastion.Get(ctx, provider, bastionID)
 			if err != nil {
 				return err
 			}
