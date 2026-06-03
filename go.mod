@@ -5,6 +5,7 @@ go 1.26.0
 require (
 	github.com/oracle/oci-go-sdk/v65 v65.117.0
 	github.com/spf13/cobra v1.10.2
+	golang.org/x/crypto v0.47.0
 	k8s.io/client-go v0.36.1
 )
 
@@ -23,7 +24,6 @@ require (
 	github.com/x448/float16 v0.8.4 // indirect
 	github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78 // indirect
 	go.yaml.in/yaml/v2 v2.4.3 // indirect
-	golang.org/x/crypto v0.47.0 // indirect
 	golang.org/x/net v0.49.0 // indirect
 	golang.org/x/oauth2 v0.34.0 // indirect
 	golang.org/x/sys v0.40.0 // indirect
