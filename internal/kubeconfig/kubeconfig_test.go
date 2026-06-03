@@ -150,6 +150,35 @@ func TestAddBastionContext_WiresLocalEndpoint(t *testing.T) {
 	}
 }
 
+// The bastion cluster must not share its CA backing array with the original;
+// reflect.DeepEqual compares contents and would miss an alias, so mutate the
+// bastion copy and assert the original is unaffected (ADR-0005).
+func TestAddBastionContext_CADoesNotAliasOriginal(t *testing.T) {
+	cfg, err := clientcmd.Load([]byte(okeKubeconfig))
+	if err != nil {
+		t.Fatalf("loading fixture: %v", err)
+	}
+	orig := cfg.Clusters["cluster-abc"]
+	want := append([]byte(nil), orig.CertificateAuthorityData...)
+
+	name, err := AddBastionContext(cfg, BastionWiring{
+		OriginalContext: "ctx-abc", PrivateEndpoint: "10.0.0.6", LocalPort: 18443,
+	})
+	if err != nil {
+		t.Fatalf("AddBastionContext returned error: %v", err)
+	}
+
+	bastionCA := cfg.Clusters[cfg.Contexts[name].Cluster].CertificateAuthorityData
+	if len(bastionCA) == 0 {
+		t.Fatal("bastion cluster has no CA data")
+	}
+	bastionCA[0] ^= 0xff // corrupt the bastion copy
+
+	if string(orig.CertificateAuthorityData) != string(want) {
+		t.Error("mutating the bastion CA changed the original: the CA slice is aliased, not copied")
+	}
+}
+
 // A realistic OKE kubeconfig as produced by
 // `oci ce cluster create-kubeconfig --token-version 2.0.0`.
 const okeKubeconfig = `apiVersion: v1

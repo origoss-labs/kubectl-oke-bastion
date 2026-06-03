@@ -6,6 +6,8 @@
 package tunnel
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -54,7 +56,7 @@ type Tunnel struct {
 // Open dials the bastion, starts a loopback listener, and forwards every
 // accepted connection through the session to Target. It returns once the
 // listener is up; forwarding runs in the background until Close.
-func Open(p Params) (*Tunnel, error) {
+func Open(ctx context.Context, p Params) (*Tunnel, error) {
 	cfg := &ssh.ClientConfig{
 		User:    p.User,
 		Auth:    []ssh.AuthMethod{ssh.PublicKeys(p.Signer)},
@@ -66,7 +68,7 @@ func Open(p Params) (*Tunnel, error) {
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 	}
 
-	client, err := dialWithRetry(p.BastionHost, cfg)
+	client, err := dialWithRetry(ctx, p.BastionHost, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -90,7 +92,7 @@ func Open(p Params) (*Tunnel, error) {
 // dialWithRetry handshakes with the bastion, retrying until dialRetryFor
 // elapses to absorb the gap between a session going ACTIVE and its key becoming
 // usable. The last error is returned if the window expires.
-func dialWithRetry(addr string, cfg *ssh.ClientConfig) (*ssh.Client, error) {
+func dialWithRetry(ctx context.Context, addr string, cfg *ssh.ClientConfig) (*ssh.Client, error) {
 	deadline := time.Now().Add(dialRetryFor)
 	for {
 		client, err := ssh.Dial("tcp", addr, cfg)
@@ -100,7 +102,13 @@ func dialWithRetry(addr string, cfg *ssh.ClientConfig) (*ssh.Client, error) {
 		if time.Now().After(deadline) {
 			return nil, fmt.Errorf("dialing bastion %s: %w", addr, err)
 		}
-		time.Sleep(dialRetryInterval)
+		// Honor cancellation: a SIGINT during the retry window must abort the
+		// dial, not block until a connection succeeds or the window elapses.
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(dialRetryInterval):
+		}
 	}
 }
 
@@ -140,8 +148,5 @@ func (t *Tunnel) forward(local net.Conn, target string) {
 func (t *Tunnel) Close() error {
 	lerr := t.listener.Close()
 	cerr := t.client.Close()
-	if lerr != nil {
-		return lerr
-	}
-	return cerr
+	return errors.Join(lerr, cerr)
 }

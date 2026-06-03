@@ -118,7 +118,7 @@ func NewRootCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			tun, err := tunnel.Open(tunnel.Params{
+			tun, err := tunnel.Open(cmd.Context(), tunnel.Params{
 				BastionHost: bastionHost,
 				User:        sshUser,
 				Signer:      key.Signer,

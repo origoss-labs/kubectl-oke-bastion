@@ -5,6 +5,7 @@ package kubeconfig
 import (
 	"fmt"
 	"net/url"
+	"strings"
 
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
@@ -116,7 +117,10 @@ func AddBastionContext(cfg *clientcmdapi.Config, w BastionWiring) (string, error
 	bastionCluster := clientcmdapi.NewCluster()
 	bastionCluster.Server = fmt.Sprintf("https://127.0.0.1:%d", w.LocalPort)
 	bastionCluster.TLSServerName = w.PrivateEndpoint
-	bastionCluster.CertificateAuthorityData = orig.CertificateAuthorityData
+	// Copy, don't alias: the bastion cluster must not share the original's CA
+	// backing array, or a later in-place mutation of one would corrupt the
+	// other and break the byte-for-byte-unchanged guarantee (ADR-0005).
+	bastionCluster.CertificateAuthorityData = append([]byte(nil), orig.CertificateAuthorityData...)
 	cfg.Clusters[clusterName] = bastionCluster
 
 	bastionCtx := clientcmdapi.NewContext()
@@ -173,7 +177,12 @@ func RemoveBastionContext(cfg *clientcmdapi.Config, ctxName string) error {
 	if !ok {
 		return nil
 	}
-	delete(cfg.Clusters, kctx.Cluster)
+	// Only drop the cluster if it is the bastion-owned one Add created
+	// (`<cluster>-bastion`). Guards against deleting a real cluster entry if the
+	// context were ever hand-edited to point elsewhere.
+	if strings.HasSuffix(kctx.Cluster, "-bastion") {
+		delete(cfg.Clusters, kctx.Cluster)
+	}
 	delete(cfg.Contexts, ctxName)
 	return nil
 }
