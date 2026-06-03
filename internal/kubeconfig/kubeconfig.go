@@ -59,10 +59,6 @@ func clusterFromConfig(cfg *clientcmdapi.Config) (ClusterInfo, error) {
 		return ClusterInfo{}, fmt.Errorf("context %q references unknown user %q", ctxName, kctx.AuthInfo)
 	}
 
-	host, err := endpointHost(cluster.Server)
-	if err != nil {
-		return ClusterInfo{}, err
-	}
 	if user.Exec == nil || user.Exec.Command != "oci" {
 		return ClusterInfo{}, fmt.Errorf("current context %q is not an OKE cluster: no oci exec credential found", ctxName)
 	}
@@ -73,6 +69,11 @@ func clusterFromConfig(cfg *clientcmdapi.Config) (ClusterInfo, error) {
 	}
 	if region == "" {
 		return ClusterInfo{}, fmt.Errorf("current context %q oci exec credential has no --region", ctxName)
+	}
+
+	host, err := endpointHost(cluster.Server)
+	if err != nil {
+		return ClusterInfo{}, err
 	}
 
 	return ClusterInfo{

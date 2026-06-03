@@ -202,6 +202,32 @@ users:
 	}
 }
 
+func TestParse_FlagWithoutValue(t *testing.T) {
+	// --region is the final arg with no value following it.
+	const danglingFlag = `apiVersion: v1
+kind: Config
+current-context: ctx-abc
+clusters:
+- name: cluster-abc
+  cluster:
+    server: https://10.0.0.6:6443
+contexts:
+- name: ctx-abc
+  context:
+    cluster: cluster-abc
+    user: user-abc
+users:
+- name: user-abc
+  user:
+    exec:
+      command: oci
+      args: [ce, cluster, generate-token, --cluster-id, ocid1.cluster.oc1.eu-frankfurt-1.aaaa, --region]
+`
+	if _, err := Parse([]byte(danglingFlag)); err == nil {
+		t.Fatal("expected an error when --region has no value, got nil")
+	}
+}
+
 func TestParse_OKEContext(t *testing.T) {
 	got, err := Parse([]byte(okeKubeconfig))
 	if err != nil {
