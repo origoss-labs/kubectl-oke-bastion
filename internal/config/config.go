@@ -72,6 +72,28 @@ func Load(path string) (Config, error) {
 	return cfg, nil
 }
 
+// UpsertCluster adds c to the config at path and persists it: Load → upsert →
+// Save. An entry with the same ClusterOCID is replaced in place rather than
+// appended, so re-running init for a cluster the operator already configured is
+// idempotent (it refreshes the region/compartment/bastion/context) instead of
+// growing a duplicate; any other existing cluster — and the chosen profile and
+// method — is preserved. A fresh config (no clusters yet, the Slice A state)
+// gains its first entry.
+func UpsertCluster(path string, c Cluster) error {
+	cfg, err := Load(path)
+	if err != nil {
+		return err
+	}
+	for i := range cfg.Clusters {
+		if cfg.Clusters[i].ClusterOCID == c.ClusterOCID {
+			cfg.Clusters[i] = c
+			return Save(path, cfg)
+		}
+	}
+	cfg.Clusters = append(cfg.Clusters, c)
+	return Save(path, cfg)
+}
+
 // Save writes cfg to path atomically: it marshals to YAML, writes a temp file
 // in the same dir with owner-only perms, then renames it into place. The
 // directory is created 0700 and the file 0600, matching the bastion store.

@@ -51,6 +51,82 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	}
 }
 
+func TestUpsertCluster_AppendsAndPreservesExisting(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := Save(path, Config{Profile: "P", Method: ociauth.APIKey, Clusters: []Cluster{
+		{ClusterOCID: "ocid1.cluster.oc1..a", KubeContext: "ctx-a"},
+	}}); err != nil {
+		t.Fatalf("seeding config: %v", err)
+	}
+
+	if err := UpsertCluster(path, Cluster{ClusterOCID: "ocid1.cluster.oc1..b", KubeContext: "ctx-b"}); err != nil {
+		t.Fatalf("UpsertCluster: %v", err)
+	}
+
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(got.Clusters) != 2 {
+		t.Fatalf("clusters = %d, want 2 (existing preserved + new appended)", len(got.Clusters))
+	}
+	// The pre-existing entry must survive unchanged, the profile/method too.
+	if got.Profile != "P" || got.Method != ociauth.APIKey {
+		t.Errorf("profile/method changed: %+v", got)
+	}
+	if got.Clusters[0].ClusterOCID != "ocid1.cluster.oc1..a" {
+		t.Errorf("existing cluster dropped or reordered: %+v", got.Clusters)
+	}
+	if got.Clusters[1].ClusterOCID != "ocid1.cluster.oc1..b" {
+		t.Errorf("new cluster not appended: %+v", got.Clusters)
+	}
+}
+
+func TestUpsertCluster_ReplacesSameOCID(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := Save(path, Config{Clusters: []Cluster{
+		{ClusterOCID: "ocid1.cluster.oc1..a", BastionOCID: "ocid1.bastion.oc1..old", KubeContext: "ctx-a"},
+	}}); err != nil {
+		t.Fatalf("seeding config: %v", err)
+	}
+
+	// Re-running init for the same cluster with a new bastion must replace, not
+	// duplicate.
+	if err := UpsertCluster(path, Cluster{ClusterOCID: "ocid1.cluster.oc1..a", BastionOCID: "ocid1.bastion.oc1..new", KubeContext: "ctx-a"}); err != nil {
+		t.Fatalf("UpsertCluster: %v", err)
+	}
+
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(got.Clusters) != 1 {
+		t.Fatalf("clusters = %d, want 1 (same OCID must replace, not append)", len(got.Clusters))
+	}
+	if got.Clusters[0].BastionOCID != "ocid1.bastion.oc1..new" {
+		t.Errorf("bastion not updated on re-run: %+v", got.Clusters[0])
+	}
+}
+
+func TestUpsertCluster_CreatesWhenAbsent(t *testing.T) {
+	// A config that exists but has no clusters yet (the Slice A state): upsert
+	// must add the first one.
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := Save(path, Config{Profile: "P", Method: ociauth.APIKey}); err != nil {
+		t.Fatalf("seeding config: %v", err)
+	}
+	if err := UpsertCluster(path, Cluster{ClusterOCID: "ocid1.cluster.oc1..first"}); err != nil {
+		t.Fatalf("UpsertCluster: %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(got.Clusters) != 1 || got.Clusters[0].ClusterOCID != "ocid1.cluster.oc1..first" {
+		t.Errorf("first cluster not added: %+v", got.Clusters)
+	}
+}
+
 func TestLoad_MissingFileIsZeroConfig(t *testing.T) {
 	got, err := Load(filepath.Join(t.TempDir(), "absent.yaml"))
 	if err != nil {
