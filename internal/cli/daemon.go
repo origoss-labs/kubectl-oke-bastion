@@ -236,12 +236,12 @@ func newStatusCmd() *cobra.Command {
 				// LoadState is recognized: a never-started daemon has no state
 				// file and is simply stopped, not an error.
 				if errors.Is(serr, os.ErrNotExist) {
-					_, _ = fmt.Fprint(out, daemon.RenderStatus(daemon.State{}, false))
+					_, _ = fmt.Fprint(out, daemon.RenderStatus(daemon.State{}, false, time.Now()))
 					return nil
 				}
 				return serr
 			}
-			_, _ = fmt.Fprint(out, daemon.RenderStatus(state, running))
+			_, _ = fmt.Fprint(out, daemon.RenderStatus(state, running, time.Now()))
 			return nil
 		},
 	}

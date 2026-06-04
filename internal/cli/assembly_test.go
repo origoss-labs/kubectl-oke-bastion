@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/origoss-labs/kubectl-oke-bastion/internal/daemon"
+	"github.com/origoss-labs/kubectl-oke-bastion/internal/supervisor"
 )
 
 // fakeWiring records the calls the stateWiring delegates to it, with no
@@ -83,6 +84,63 @@ func TestStateWiring_UnwireMarksStoppedAndDelegates(t *testing.T) {
 	}
 	if got.Phase != daemon.PhaseStopped {
 		t.Errorf("Phase = %q, want %q", got.Phase, daemon.PhaseStopped)
+	}
+}
+
+// The supervisor observer must map a Report into the daemon state file so status
+// surfaces phase, local port, restart count, last error, and session expiry (for
+// time-remaining) as the tunnel rebuilds.
+func TestStateObserver_MapsReportToState(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	started := time.Date(2026, 6, 4, 9, 0, 0, 0, time.UTC)
+	expiry := started.Add(3 * time.Hour)
+	obs := newStateObserver(statePath, started, io.Discard)
+
+	obs.observe(supervisor.Report{
+		Phase:        supervisor.PhaseRebuilding,
+		LocalPort:    51234,
+		Deadline:     expiry,
+		RestartCount: 3,
+		LastErr:      "open tunnel: connection refused",
+	})
+
+	got, err := daemon.LoadState(statePath)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if got.Phase != daemon.PhaseRunning {
+		t.Errorf("Phase = %q, want %q (a rebuilding report maps to running-not-yet-active)", got.Phase, daemon.PhaseRunning)
+	}
+	if got.LocalPort != 51234 {
+		t.Errorf("LocalPort = %d, want 51234", got.LocalPort)
+	}
+	if got.RestartCount != 3 {
+		t.Errorf("RestartCount = %d, want 3", got.RestartCount)
+	}
+	if got.LastError != "open tunnel: connection refused" {
+		t.Errorf("LastError = %q, want the report error", got.LastError)
+	}
+	if !got.SessionExpiry.Equal(expiry) {
+		t.Errorf("SessionExpiry = %v, want %v", got.SessionExpiry, expiry)
+	}
+	if !got.StartedAt.Equal(started) {
+		t.Errorf("StartedAt = %v, want %v", got.StartedAt, started)
+	}
+}
+
+// An active report maps to PhaseActive so status reflects a healthy tunnel.
+func TestStateObserver_ActiveReportMapsToActivePhase(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	obs := newStateObserver(statePath, time.Now(), io.Discard)
+
+	obs.observe(supervisor.Report{Phase: supervisor.PhaseActive, LocalPort: 40000, Deadline: time.Now().Add(time.Hour)})
+
+	got, err := daemon.LoadState(statePath)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if got.Phase != daemon.PhaseActive {
+		t.Errorf("Phase = %q, want %q", got.Phase, daemon.PhaseActive)
 	}
 }
 

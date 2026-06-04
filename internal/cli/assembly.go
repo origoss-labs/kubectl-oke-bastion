@@ -54,6 +54,12 @@ func (w *stateWiring) Wire(localPort int) error {
 
 func (w *stateWiring) Unwire() error {
 	uerr := w.inner.Unwire()
+	// Last-writer invariant: this PhaseStopped write must remain the final write
+	// to p.State(). It and stateObserver both target the same file; correctness
+	// today rests on Unwire running last (in the supervisor's teardown defer,
+	// after the loop has stopped reporting). Do NOT make the observer fire during
+	// teardown or run it asynchronously, or a late PhaseActive write could clobber
+	// this stopped state and status would wrongly read running.
 	if serr := daemon.SaveState(w.statePath, daemon.State{
 		Phase:     daemon.PhaseStopped,
 		StartedAt: w.startedAt,
@@ -61,6 +67,56 @@ func (w *stateWiring) Unwire() error {
 		_, _ = fmt.Fprintf(w.out, "recording stopped state: %v\n", serr)
 	}
 	return uerr
+}
+
+// stateObserver maps the supervisor's Report into the daemon state file. It is
+// the home for the dynamic, periodic updates (restart count, last error, the
+// session expiry behind time-remaining, the rebuilding phase) the wire-once
+// stateWiring cannot see: the supervisor calls observe on each transition
+// (active / rebuilding), and this records the full picture so status reflects a
+// rebuild in flight, not just the initial wire. State writes are best-effort —
+// they are owner-only status plumbing and must never interrupt supervision — so
+// a failure is logged to out (→ the daemon log) and the loop proceeds, matching
+// stateWiring's and supervisor.status's "status must not interrupt" philosophy.
+//
+// It does not write a stopped phase: that is a teardown signal stateWiring.Unwire
+// owns (it fires once, last, in the supervisor's defer), keeping the down→
+// teardown chain intact and authoritative for the final state. See the
+// last-writer invariant noted on stateWiring.Unwire — both write the same file,
+// and Unwire's stopped write must stay the last one.
+type stateObserver struct {
+	statePath string
+	startedAt time.Time
+	out       io.Writer
+}
+
+// newStateObserver builds the observer runTunnel hands the supervisor; startedAt
+// is the daemon's start time, preserved across every state write so status keeps
+// reporting a stable uptime through rebuilds.
+func newStateObserver(statePath string, startedAt time.Time, out io.Writer) *stateObserver {
+	return &stateObserver{statePath: statePath, startedAt: startedAt, out: out}
+}
+
+// observe maps one Report into daemon.State and saves it. It switches on the
+// supervisor's exported Phase consts (not a bare string) so a rename there is a
+// compile error here rather than a silent fall-through to active:
+// PhaseRebuilding maps to PhaseRunning (recovering, not yet active); PhaseActive
+// to PhaseActive.
+func (o *stateObserver) observe(r supervisor.Report) {
+	phase := daemon.PhaseActive
+	if r.Phase == supervisor.PhaseRebuilding {
+		phase = daemon.PhaseRunning
+	}
+	if serr := daemon.SaveState(o.statePath, daemon.State{
+		Phase:         phase,
+		StartedAt:     o.startedAt,
+		RestartCount:  r.RestartCount,
+		LastError:     r.LastErr,
+		LocalPort:     r.LocalPort,
+		SessionExpiry: r.Deadline,
+	}); serr != nil {
+		_, _ = fmt.Fprintf(o.out, "recording supervisor state: %v\n", serr)
+	}
 }
 
 // runTunnel is the single supervisor-assembly path both __daemon (background)
@@ -104,17 +160,24 @@ func runTunnel(ctx context.Context, cluster config.Cluster, p daemon.Paths, auth
 		target:    session.Target{PrivateIP: info.PrivateEndpoint, Port: k8sAPIPort},
 		dialTo:    fmt.Sprintf("%s:%d", info.PrivateEndpoint, k8sAPIPort),
 	}
+	startedAt := time.Now()
 	wiring := &stateWiring{
 		inner: &liveWiring{
 			originalContext: cluster.KubeContext,
 			privateEndpoint: info.PrivateEndpoint,
 		},
 		statePath: p.State(),
-		startedAt: time.Now(),
+		startedAt: startedAt,
 		out:       out,
 	}
+	// The observer carries the rebuild-time state (restart count, last error,
+	// session expiry → time-remaining) the wire-once stateWiring cannot; both
+	// share startedAt so uptime stays stable. stateWiring still owns the load-
+	// bearing -bastion wire/unwire and the stopped-on-teardown signal.
+	obs := newStateObserver(p.State(), startedAt, out)
 
-	if rerr := supervisor.Run(ctx, builder, wiring, out); rerr != nil && !errors.Is(rerr, context.Canceled) {
+	if rerr := supervisor.Run(ctx, builder, wiring, out,
+		supervisor.WithObserver(obs.observe)); rerr != nil && !errors.Is(rerr, context.Canceled) {
 		return rerr
 	}
 	return nil

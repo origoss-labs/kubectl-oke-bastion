@@ -42,6 +42,12 @@ type State struct {
 	// the supervisor brings the forward up. Zero until the tunnel is active;
 	// surfaced by status so the operator sees where the -bastion context points.
 	LocalPort int `json:"local_port,omitempty"`
+	// SessionExpiry is when the current bastion session hits OCI's TTL cap (its
+	// created-at + 3h), reported by the supervisor as it (re)builds. status
+	// renders the time remaining (expiry − now) from it, so the operator sees how
+	// long the session is good for before the proactive rebuild. Zero until the
+	// first session is active; omitted from the file when unset.
+	SessionExpiry time.Time `json:"session_expiry,omitempty"`
 }
 
 // LoadState reads the state file at path. Unlike config.Load, a missing file is
