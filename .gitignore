@@ -33,6 +33,10 @@ go.work.sum
 
 # built binary
 /kubectl-oke-bastion
+/kob
+
+# local kubeconfig dropped in the repo for manual testing (contains credentials)
+/kubeconfig
 
 # direnv / nix
 .direnv/

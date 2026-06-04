@@ -1,6 +1,6 @@
 # 6. Reactive recreate for v1; proactive rotation deferred
 
-- Status: Accepted
+- Status: Superseded by [ADR-0010](0010-time-aware-unified-rebuild.md)
 - Date: 2026-06-03
 
 ## Context

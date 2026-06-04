@@ -1,6 +1,6 @@
 # 3. Run the supervisor in the foreground, not as a daemon
 
-- Status: Accepted
+- Status: Superseded by [ADR-0009](0009-background-daemon-supersedes-foreground.md)
 - Date: 2026-06-03
 
 ## Context
