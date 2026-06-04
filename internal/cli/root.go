@@ -77,7 +77,7 @@ func NewRootCmd() *cobra.Command {
 			// Prove the bastion is reachable with these credentials.
 			ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 			defer cancel()
-			handle, err := bastion.Get(ctx, provider, bastionID)
+			handle, err := bastion.Get(ctx, provider, info.Region, bastionID)
 			if err != nil {
 				return err
 			}
@@ -93,7 +93,7 @@ func NewRootCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			client, err := bastion.NewClient(provider)
+			client, err := bastion.NewClient(provider, info.Region)
 			if err != nil {
 				return err
 			}

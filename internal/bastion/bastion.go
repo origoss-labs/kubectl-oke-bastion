@@ -17,21 +17,27 @@ type Handle struct {
 	State string
 }
 
-// NewClient builds an OCI bastion client from a configuration provider. It is
-// the single place the SDK constructor is wrapped, shared by Get and by the
-// session lifecycle.
-func NewClient(cp common.ConfigurationProvider) (ocibastion.BastionClient, error) {
+// NewClient builds an OCI bastion client from a configuration provider, pinned
+// to region. The bastion is co-located with the OKE cluster, so the caller
+// passes the cluster's region (read from kubeconfig) rather than relying on the
+// provider's default — the operator's default region need not match the
+// cluster's. It is the single place the SDK constructor is wrapped, shared by
+// Get and by the session lifecycle.
+func NewClient(cp common.ConfigurationProvider, region string) (ocibastion.BastionClient, error) {
 	client, err := ocibastion.NewBastionClientWithConfigurationProvider(cp)
 	if err != nil {
 		return ocibastion.BastionClient{}, fmt.Errorf("creating bastion client: %w", err)
 	}
+	if region != "" {
+		client.SetRegion(region)
+	}
 	return client, nil
 }
 
-// Get proves the credentials work by calling GetBastion, returning the
-// bastion's name and lifecycle state.
-func Get(ctx context.Context, cp common.ConfigurationProvider, id string) (Handle, error) {
-	client, err := NewClient(cp)
+// Get proves the credentials work by calling GetBastion in region, returning
+// the bastion's name and lifecycle state.
+func Get(ctx context.Context, cp common.ConfigurationProvider, region, id string) (Handle, error) {
+	client, err := NewClient(cp, region)
 	if err != nil {
 		return Handle{}, err
 	}

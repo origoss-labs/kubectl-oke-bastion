@@ -20,6 +20,7 @@
             pkgs.go_1_26
             pkgs.golangci-lint
             pkgs.gofumpt
+            pkgs.oci-cli
             pkgs.goreleaser
             pkgs.pre-commit
             pkgs.yamllint
