@@ -4,8 +4,8 @@
 // for forward compatibility (later slices append a discovered cluster, region,
 // compartment, bastion, and kube context per entry) but stays empty here.
 //
-// Like the bastion store, the file is owner-only plumbing, not a security
-// boundary: it names a profile and OCIDs, no secrets. It is written atomically
+// The file is owner-only plumbing, not a security boundary: it names a profile
+// and OCIDs, no secrets. It is written atomically
 // (temp file + rename) so a crash mid-write can never leave a truncated file
 // that load would reject and lock the operator out of their config.
 package config
@@ -44,8 +44,8 @@ type Cluster struct {
 }
 
 // DefaultPath is the standard config location under the user config dir
-// (e.g. ~/.config/kubectl-oke-bastion/config.yaml on Linux), mirroring
-// store.DefaultPath so the two files sit side by side.
+// (e.g. ~/.config/kubectl-oke-bastion/config.yaml on Linux), sharing the
+// kubectl-oke-bastion dir with the daemon control files (daemon.DefaultBase).
 func DefaultPath() (string, error) {
 	dir, err := os.UserConfigDir()
 	if err != nil {
@@ -96,7 +96,8 @@ func UpsertCluster(path string, c Cluster) error {
 
 // Save writes cfg to path atomically: it marshals to YAML, writes a temp file
 // in the same dir with owner-only perms, then renames it into place. The
-// directory is created 0700 and the file 0600, matching the bastion store.
+// directory is created 0700 and the file 0600, matching the daemon state file's
+// atomic-write convention.
 func Save(path string, cfg Config) error {
 	raw, err := yaml.Marshal(cfg)
 	if err != nil {

@@ -14,11 +14,17 @@ import (
 type Phase string
 
 const (
-	// PhaseStarting is written before the tunnel work begins; in this slice the
-	// daemon transitions straight to PhaseRunning since there is no tunnel yet.
+	// PhaseStarting is written before the tunnel work begins, while the daemon
+	// is establishing its session and forward.
 	PhaseStarting Phase = "starting"
-	// PhaseRunning means the daemon is up and idling (later: tunnel active).
+	// PhaseRunning is the recovering-but-not-yet-active phase. The Slice D daemon
+	// goes straight starting→active→stopped and never writes it; it is retained
+	// for Slice E, which reports a tunnel rebuilding after a break/expiry as
+	// running-not-yet-active. Tests also use it as a sample non-active phase.
 	PhaseRunning Phase = "running"
+	// PhaseActive means the tunnel is up: a session is open, the forward is
+	// listening on LocalPort, and the -bastion context is wired to it.
+	PhaseActive Phase = "active"
 	// PhaseStopped means the daemon exited cleanly on a signal.
 	PhaseStopped Phase = "stopped"
 )
@@ -32,6 +38,10 @@ type State struct {
 	StartedAt    time.Time `json:"started_at"`
 	RestartCount int       `json:"restart_count"`
 	LastError    string    `json:"last_error,omitempty"`
+	// LocalPort is the loopback port the active tunnel listens on, captured when
+	// the supervisor brings the forward up. Zero until the tunnel is active;
+	// surfaced by status so the operator sees where the -bastion context points.
+	LocalPort int `json:"local_port,omitempty"`
 }
 
 // LoadState reads the state file at path. Unlike config.Load, a missing file is
@@ -52,7 +62,7 @@ func LoadState(path string) (State, error) {
 }
 
 // SaveState writes s to path atomically (temp file in the same dir + rename),
-// matching the store/config convention so a crash mid-write can never leave a
+// matching the config convention so a crash mid-write can never leave a
 // truncated file that LoadState would reject. The dir is created 0700 and the
 // file 0600.
 func SaveState(path string, s State) error {

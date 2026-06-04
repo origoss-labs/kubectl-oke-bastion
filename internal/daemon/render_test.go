@@ -26,6 +26,14 @@ func TestRenderStatus(t *testing.T) {
 			want:    []string{"running", string(PhaseRunning), "2", "2026-06-04"},
 		},
 		{
+			// An active tunnel surfaces its local loopback port so the operator
+			// can point kubectl at it without re-deriving the -bastion context.
+			name:    "active tunnel reports its local port",
+			state:   State{Phase: PhaseActive, StartedAt: started, LocalPort: 49231},
+			running: true,
+			want:    []string{"running", string(PhaseActive), "49231"},
+		},
+		{
 			name:    "live but errored daemon shows the last error",
 			state:   State{Phase: PhaseRunning, StartedAt: started, LastError: "redial failed"},
 			running: true,

@@ -577,3 +577,64 @@ func TestParse_OKEContext(t *testing.T) {
 		t.Errorf("Parse() = %+v, want %+v", got, want)
 	}
 }
+
+// twoContextKubeconfig has two OKE contexts and a current-context that is
+// neither of the ones the daemon would target — proving InfoForContext keys off
+// the named context, not current-context.
+const twoContextKubeconfig = `apiVersion: v1
+kind: Config
+current-context: ctx-one
+clusters:
+- name: cluster-one
+  cluster:
+    server: https://10.0.0.1:6443
+    certificate-authority-data: ZmFrZS1jYQ==
+- name: cluster-two
+  cluster:
+    server: https://10.0.0.2:6443
+    certificate-authority-data: ZmFrZS1jYQ==
+contexts:
+- name: ctx-one
+  context:
+    cluster: cluster-one
+    user: user-one
+- name: ctx-two
+  context:
+    cluster: cluster-two
+    user: user-two
+users:
+- name: user-one
+  user:
+    exec:
+      command: oci
+      args: [ce, cluster, generate-token, --cluster-id, ocid1.cluster.oc1..one, --region, eu-frankfurt-1]
+- name: user-two
+  user:
+    exec:
+      command: oci
+      args: [ce, cluster, generate-token, --cluster-id, ocid1.cluster.oc1..two, --region, us-ashburn-1]
+`
+
+func TestParseContext_NamedContextWins(t *testing.T) {
+	// Ask for ctx-two even though current-context is ctx-one: the daemon resolves
+	// facts for the configured kube context, not whichever one is current.
+	got, err := ParseContext([]byte(twoContextKubeconfig), "ctx-two")
+	if err != nil {
+		t.Fatalf("ParseContext returned error: %v", err)
+	}
+	want := ClusterInfo{
+		ContextName:     "ctx-two",
+		PrivateEndpoint: "10.0.0.2",
+		ClusterOCID:     "ocid1.cluster.oc1..two",
+		Region:          "us-ashburn-1",
+	}
+	if got != want {
+		t.Errorf("ParseContext(ctx-two) = %+v, want %+v", got, want)
+	}
+}
+
+func TestParseContext_UnknownContextErrors(t *testing.T) {
+	if _, err := ParseContext([]byte(twoContextKubeconfig), "ctx-nope"); err == nil {
+		t.Fatal("expected an error for an unknown context name, got nil")
+	}
+}

@@ -28,28 +28,42 @@ func Parse(raw []byte) (ClusterInfo, error) {
 	if err != nil {
 		return ClusterInfo{}, fmt.Errorf("parsing kubeconfig: %w", err)
 	}
-	return clusterFromConfig(cfg)
+	return clusterFromConfig(cfg, cfg.CurrentContext)
 }
 
-// Current loads the kubeconfig via the standard loading rules (honoring the
-// KUBECONFIG environment variable and default path) and extracts the current
-// context's OKE cluster facts.
-func Current() (ClusterInfo, error) {
+// ParseContext reads kubeconfig YAML and extracts the named context's OKE
+// cluster facts. It is the hermetic, byte-driven core of InfoForContext, exposed
+// so the named-context extraction (the daemon's hot path) is unit-testable
+// without touching the operator's real kubeconfig.
+func ParseContext(raw []byte, name string) (ClusterInfo, error) {
+	cfg, err := clientcmd.Load(raw)
+	if err != nil {
+		return ClusterInfo{}, fmt.Errorf("parsing kubeconfig: %w", err)
+	}
+	return clusterFromConfig(cfg, name)
+}
+
+// InfoForContext loads the kubeconfig via the standard loading rules (honoring
+// KUBECONFIG and the default path) and extracts the named context's OKE cluster
+// facts — notably the private endpoint the daemon's tunnel targets. The daemon
+// resolves facts for a specific configured context (config.Cluster.KubeContext),
+// not whichever context happens to be current, since the merged base context
+// Slice B wrote — not config.yaml — carries the private endpoint.
+func InfoForContext(name string) (ClusterInfo, error) {
 	cfg, err := clientcmd.NewDefaultClientConfigLoadingRules().Load()
 	if err != nil {
 		return ClusterInfo{}, fmt.Errorf("loading kubeconfig: %w", err)
 	}
-	return clusterFromConfig(cfg)
+	return clusterFromConfig(cfg, name)
 }
 
-func clusterFromConfig(cfg *clientcmdapi.Config) (ClusterInfo, error) {
-	ctxName := cfg.CurrentContext
+func clusterFromConfig(cfg *clientcmdapi.Config, ctxName string) (ClusterInfo, error) {
 	if ctxName == "" {
 		return ClusterInfo{}, fmt.Errorf("kubeconfig has no current-context set; select one with `kubectl config use-context`")
 	}
 	kctx, ok := cfg.Contexts[ctxName]
 	if !ok {
-		return ClusterInfo{}, fmt.Errorf("kubeconfig current-context %q is not defined in contexts", ctxName)
+		return ClusterInfo{}, fmt.Errorf("kubeconfig context %q is not defined in contexts", ctxName)
 	}
 	cluster, ok := cfg.Clusters[kctx.Cluster]
 	if !ok {
@@ -61,15 +75,15 @@ func clusterFromConfig(cfg *clientcmdapi.Config) (ClusterInfo, error) {
 	}
 
 	if user.Exec == nil || user.Exec.Command != "oci" {
-		return ClusterInfo{}, fmt.Errorf("current context %q is not an OKE cluster: no oci exec credential found", ctxName)
+		return ClusterInfo{}, fmt.Errorf("context %q is not an OKE cluster: no oci exec credential found", ctxName)
 	}
 	ocid := execArg(user.Exec.Args, "--cluster-id")
 	region := execArg(user.Exec.Args, "--region")
 	if ocid == "" {
-		return ClusterInfo{}, fmt.Errorf("current context %q is not an OKE cluster: oci exec credential has no --cluster-id", ctxName)
+		return ClusterInfo{}, fmt.Errorf("context %q is not an OKE cluster: oci exec credential has no --cluster-id", ctxName)
 	}
 	if region == "" {
-		return ClusterInfo{}, fmt.Errorf("current context %q oci exec credential has no --region", ctxName)
+		return ClusterInfo{}, fmt.Errorf("context %q oci exec credential has no --region", ctxName)
 	}
 
 	host, err := endpointHost(cluster.Server)

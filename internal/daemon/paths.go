@@ -2,10 +2,11 @@
 // (ADR-0009): it spawns a detached daemon, tracks it through a PID file and a
 // state file, and inspects it for status — all file-and-signal based, no socket.
 //
-// This slice wires only the control plane; the daemon does no tunnel work yet
-// (it idles until SIGTERM). The testable logic — state I/O, path layout, PID
-// liveness, status rendering — is split into separate files from the OS-level
-// re-exec/detach (run.go), which is integration-only and not unit-tested.
+// The testable logic — state I/O, path layout, PID liveness, status rendering —
+// is split into separate files from the OS-level re-exec/detach (run.go), which
+// is integration-only and not unit-tested. The daemon body itself (resolving
+// config, running the supervisor) lives in the cli package's __daemon command,
+// which reuses the same runTunnel assembly as `up --foreground`.
 package daemon
 
 import (

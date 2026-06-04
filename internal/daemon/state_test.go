@@ -13,10 +13,11 @@ import (
 func TestState_SaveLoadRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	want := State{
-		Phase:        PhaseRunning,
+		Phase:        PhaseActive,
 		StartedAt:    time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC),
 		RestartCount: 3,
 		LastError:    "boom",
+		LocalPort:    49555,
 	}
 
 	if err := SaveState(path, want); err != nil {
@@ -37,6 +38,9 @@ func TestState_SaveLoadRoundTrip(t *testing.T) {
 	}
 	if got.LastError != want.LastError {
 		t.Errorf("LastError = %q, want %q", got.LastError, want.LastError)
+	}
+	if got.LocalPort != want.LocalPort {
+		t.Errorf("LocalPort = %d, want %d", got.LocalPort, want.LocalPort)
 	}
 }
 

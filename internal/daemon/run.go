@@ -3,13 +3,10 @@
 package daemon
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"os/exec"
-	"os/signal"
 	"syscall"
-	"time"
 )
 
 // daemonArg is the hidden argv the parent re-execs itself with to enter the
@@ -62,34 +59,4 @@ func Spawn(p Paths, extraArgs ...string) error {
 		return fmt.Errorf("releasing daemon process: %w", err)
 	}
 	return nil
-}
-
-// Run is the hidden __daemon entrypoint's body. For this slice it does no tunnel
-// work: it marks the state running, blocks until SIGTERM/SIGINT, then marks the
-// state stopped and removes the PID file so a subsequent status reads not-running.
-// It is integration-only (a blocking signal loop) and not unit-tested.
-func Run(p Paths) error {
-	running := State{
-		Phase:        PhaseRunning,
-		StartedAt:    time.Now(),
-		RestartCount: 0,
-	}
-	if err := SaveState(p.State(), running); err != nil {
-		return err
-	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-	defer stop()
-	<-ctx.Done() // idle until signalled; Slice D replaces this with the supervisor
-
-	// Best-effort cleanup: record the stop, then drop the PID file. Errors here
-	// are logged via stderr (→ the log file) but must not block exit. Only Phase
-	// flips — StartedAt and RestartCount carry over so a stopped state still
-	// reports when the run began and how often it rebuilt.
-	stopped := running
-	stopped.Phase = PhaseStopped
-	if err := SaveState(p.State(), stopped); err != nil {
-		fmt.Fprintf(os.Stderr, "marking daemon stopped: %v\n", err)
-	}
-	return RemovePID(p.PID())
 }

@@ -13,8 +13,9 @@ import (
 // only as fresh as the daemon's last write.
 //
 // The rendered fields are exactly what this slice tracks — status, phase,
-// started-at, restart count, and last error (when set). Time-remaining lands in
-// Slice E once the tunnel and its session deadline exist.
+// started-at, restart count, the active tunnel's local port (when set), and
+// last error (when set). Time-remaining lands in Slice E once the session
+// deadline exists.
 func RenderStatus(s State, running bool) string {
 	if !running {
 		return "status: stopped\n"
@@ -24,6 +25,9 @@ func RenderStatus(s State, running bool) string {
 	fmt.Fprintf(&b, "phase:    %s\n", s.Phase)
 	fmt.Fprintf(&b, "started:  %s\n", s.StartedAt.Format(time.RFC3339))
 	fmt.Fprintf(&b, "restarts: %d\n", s.RestartCount)
+	if s.LocalPort != 0 {
+		fmt.Fprintf(&b, "local port: %d\n", s.LocalPort)
+	}
 	if s.LastError != "" {
 		fmt.Fprintf(&b, "last error: %s\n", s.LastError)
 	}
