@@ -135,6 +135,7 @@ func NewRootCmd() *cobra.Command {
 		"OCID of the pre-existing OCI Bastion to tunnel through")
 	cmd.Flags().IntVar(&localPort, "local-port", 0,
 		"local loopback port for the tunnel; 0 lets the OS assign one")
+	cmd.AddCommand(newInitCmd())
 	return cmd
 }
 

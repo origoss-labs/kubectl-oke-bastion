@@ -6,6 +6,7 @@ require (
 	github.com/oracle/oci-go-sdk/v65 v65.117.0
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/crypto v0.47.0
+	gopkg.in/yaml.v3 v3.0.1
 	k8s.io/client-go v0.36.1
 )
 
