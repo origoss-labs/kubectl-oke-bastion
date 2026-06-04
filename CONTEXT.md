@@ -31,8 +31,29 @@ must be created.
 `localhost:<local-port>` → Bastion → `private-endpoint:6443`. A tunnel exists
 only while both its session is valid and its SSH connection is up.
 
-**Supervisor** — the foreground process that owns a tunnel for the duration of a
-`kubectl oke bastion` invocation. Watches the tunnel and rebuilds it on failure.
+**Supervisor** — the process that owns a tunnel and rebuilds it on failure. Runs
+as a detached **Daemon** (see below), not in the foreground.
+
+**Daemon** — the background, detached process that runs the Supervisor for a
+configured cluster, hidden from the operator. Started by `up`, stopped by
+`down`, inspected by `status`. Persists across terminal sessions until stopped.
+
+**init** — the onboarding command. Interactively selects an OCI Profile, walks
+the tenancy's compartments to find OKE clusters, and selects a cluster and its
+Bastion; generates and merges the cluster's kubeconfig; and writes the choices to
+the Config. Does not start the Daemon.
+
+**up / down / status** — the Daemon lifecycle commands: `up` starts the Daemon
+for a configured cluster and returns immediately; `down` stops it; `status`
+reports whether the tunnel is currently up.
+
+**Profile** — a named credential section in the operator's `~/.oci/config`. init
+records which Profile the Daemon authenticates with.
+
+**Config** — the single YAML file holding the operator's choices: the Profile and
+a list of configured clusters (each with its cluster, region, compartment,
+Bastion, and kube context). The source of truth for `up`. Supersedes the earlier
+cluster→bastion store.
 
 **Break** — failure mode where the SSH connection drops while the session is
 still valid. Recovered by redialing; no new session needed.
