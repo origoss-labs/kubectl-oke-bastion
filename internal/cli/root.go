@@ -136,6 +136,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.Flags().IntVar(&localPort, "local-port", 0,
 		"local loopback port for the tunnel; 0 lets the OS assign one")
 	cmd.AddCommand(newInitCmd())
+	cmd.AddCommand(newUpCmd(), newDownCmd(), newStatusCmd(), newDaemonCmd())
 	return cmd
 }
 
