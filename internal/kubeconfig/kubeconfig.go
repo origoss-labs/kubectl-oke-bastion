@@ -28,28 +28,42 @@ func Parse(raw []byte) (ClusterInfo, error) {
 	if err != nil {
 		return ClusterInfo{}, fmt.Errorf("parsing kubeconfig: %w", err)
 	}
-	return clusterFromConfig(cfg)
+	return clusterFromConfig(cfg, cfg.CurrentContext)
 }
 
-// Current loads the kubeconfig via the standard loading rules (honoring the
-// KUBECONFIG environment variable and default path) and extracts the current
-// context's OKE cluster facts.
-func Current() (ClusterInfo, error) {
+// ParseContext reads kubeconfig YAML and extracts the named context's OKE
+// cluster facts. It is the hermetic, byte-driven core of InfoForContext, exposed
+// so the named-context extraction (the daemon's hot path) is unit-testable
+// without touching the operator's real kubeconfig.
+func ParseContext(raw []byte, name string) (ClusterInfo, error) {
+	cfg, err := clientcmd.Load(raw)
+	if err != nil {
+		return ClusterInfo{}, fmt.Errorf("parsing kubeconfig: %w", err)
+	}
+	return clusterFromConfig(cfg, name)
+}
+
+// InfoForContext loads the kubeconfig via the standard loading rules (honoring
+// KUBECONFIG and the default path) and extracts the named context's OKE cluster
+// facts — notably the private endpoint the daemon's tunnel targets. The daemon
+// resolves facts for a specific configured context (config.Cluster.KubeContext),
+// not whichever context happens to be current, since the merged base context
+// Slice B wrote — not config.yaml — carries the private endpoint.
+func InfoForContext(name string) (ClusterInfo, error) {
 	cfg, err := clientcmd.NewDefaultClientConfigLoadingRules().Load()
 	if err != nil {
 		return ClusterInfo{}, fmt.Errorf("loading kubeconfig: %w", err)
 	}
-	return clusterFromConfig(cfg)
+	return clusterFromConfig(cfg, name)
 }
 
-func clusterFromConfig(cfg *clientcmdapi.Config) (ClusterInfo, error) {
-	ctxName := cfg.CurrentContext
+func clusterFromConfig(cfg *clientcmdapi.Config, ctxName string) (ClusterInfo, error) {
 	if ctxName == "" {
 		return ClusterInfo{}, fmt.Errorf("kubeconfig has no current-context set; select one with `kubectl config use-context`")
 	}
 	kctx, ok := cfg.Contexts[ctxName]
 	if !ok {
-		return ClusterInfo{}, fmt.Errorf("kubeconfig current-context %q is not defined in contexts", ctxName)
+		return ClusterInfo{}, fmt.Errorf("kubeconfig context %q is not defined in contexts", ctxName)
 	}
 	cluster, ok := cfg.Clusters[kctx.Cluster]
 	if !ok {
@@ -61,15 +75,15 @@ func clusterFromConfig(cfg *clientcmdapi.Config) (ClusterInfo, error) {
 	}
 
 	if user.Exec == nil || user.Exec.Command != "oci" {
-		return ClusterInfo{}, fmt.Errorf("current context %q is not an OKE cluster: no oci exec credential found", ctxName)
+		return ClusterInfo{}, fmt.Errorf("context %q is not an OKE cluster: no oci exec credential found", ctxName)
 	}
 	ocid := execArg(user.Exec.Args, "--cluster-id")
 	region := execArg(user.Exec.Args, "--region")
 	if ocid == "" {
-		return ClusterInfo{}, fmt.Errorf("current context %q is not an OKE cluster: oci exec credential has no --cluster-id", ctxName)
+		return ClusterInfo{}, fmt.Errorf("context %q is not an OKE cluster: oci exec credential has no --cluster-id", ctxName)
 	}
 	if region == "" {
-		return ClusterInfo{}, fmt.Errorf("current context %q oci exec credential has no --region", ctxName)
+		return ClusterInfo{}, fmt.Errorf("context %q oci exec credential has no --region", ctxName)
 	}
 
 	host, err := endpointHost(cluster.Server)
@@ -184,6 +198,64 @@ func RemoveBastionContext(cfg *clientcmdapi.Config, ctxName string) error {
 		delete(cfg.Clusters, kctx.Cluster)
 	}
 	delete(cfg.Contexts, ctxName)
+	return nil
+}
+
+// DefaultKubeconfigPath returns the file init should merge into: the first
+// entry of $KUBECONFIG if set, else the standard ~/.kube/config. This is the
+// file clientcmd treats as the writable "global" target, so a merge lands where
+// kubectl will read it. The init command resolves this once and passes it to
+// MergeKubeconfig; tests pass a TempDir path instead and never touch the real
+// file.
+func DefaultKubeconfigPath() string {
+	return clientcmd.NewDefaultPathOptions().GetDefaultFilename()
+}
+
+// MergeKubeconfig merges the base context of an OKE CreateKubeconfig YAML blob
+// into the kubeconfig file at path, overwriting same-named cluster/context/user
+// entries and preserving every other entry, written atomically. A missing file
+// (and its parent directory) is created. path is an explicit parameter — not
+// the resolved default — so a caller (and every test) controls exactly which
+// file is touched; the production caller passes DefaultKubeconfigPath().
+//
+// The merge is a last-wins map union: clientcmd.ModifyConfig with relativizing
+// off writes the union of the on-disk config and the blob, and because both
+// sides key clusters/contexts/users by name, a name present in the blob
+// replaces the on-disk entry rather than duplicating it. The blob's
+// current-context is intentionally not adopted: init shouldn't hijack the
+// operator's active context — the up command wires its own -bastion context.
+func MergeKubeconfig(path string, blob []byte) error {
+	incoming, err := clientcmd.Load(blob)
+	if err != nil {
+		return fmt.Errorf("parsing kubeconfig blob: %w", err)
+	}
+
+	// Pin ModifyConfig to exactly this file: GlobalFile is the write target and
+	// the loading precedence so the starting config is read from (and merged
+	// back into) path alone, never the operator's real default.
+	pathOpts := clientcmd.NewDefaultPathOptions()
+	pathOpts.GlobalFile = path
+	pathOpts.EnvVar = "" // ignore $KUBECONFIG so tests are hermetic
+	pathOpts.LoadingRules = &clientcmd.ClientConfigLoadingRules{ExplicitPath: path}
+
+	existing, err := pathOpts.GetStartingConfig()
+	if err != nil {
+		return fmt.Errorf("loading kubeconfig %s: %w", path, err)
+	}
+
+	for name, c := range incoming.Clusters {
+		existing.Clusters[name] = c
+	}
+	for name, a := range incoming.AuthInfos {
+		existing.AuthInfos[name] = a
+	}
+	for name, ctx := range incoming.Contexts {
+		existing.Contexts[name] = ctx
+	}
+
+	if err := clientcmd.ModifyConfig(pathOpts, *existing, false); err != nil {
+		return fmt.Errorf("merging kubeconfig into %s: %w", path, err)
+	}
 	return nil
 }
 

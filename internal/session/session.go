@@ -53,8 +53,15 @@ type Session struct {
 	Username string
 	SSHMeta  map[string]string
 
-	client BastionClient
+	deadline time.Time
+	client   BastionClient
 }
+
+// Deadline reports when this session hits OCI's TTL cap and the supervisor must
+// have rebuilt before. It is created-at + MaxTTLSeconds, recorded when the
+// session went ACTIVE, so the supervisor's proactive rebuild can preempt the
+// boundary instead of waiting for the tunnel to break at expiry.
+func (s *Session) Deadline() time.Time { return s.deadline }
 
 // Open creates the port-forwarding session and blocks until it is ACTIVE.
 func Open(ctx context.Context, c BastionClient, p Params) (*Session, error) {
@@ -114,6 +121,14 @@ func waitActive(ctx context.Context, c BastionClient, id string, interval time.D
 			s := &Session{ID: id, SSHMeta: got.SshMetadata, client: c}
 			if got.BastionUserName != nil {
 				s.Username = *got.BastionUserName
+			}
+			// Record the TTL deadline from OCI's created-at when present, else
+			// from now: the supervisor needs it to rebuild proactively before the
+			// 3h cap rather than only reactively when the tunnel breaks.
+			if got.TimeCreated != nil {
+				s.deadline = got.TimeCreated.Time.Add(MaxTTLSeconds * time.Second)
+			} else {
+				s.deadline = time.Now().Add(MaxTTLSeconds * time.Second)
 			}
 			return s, nil
 		case ocibastion.SessionLifecycleStateCreating:

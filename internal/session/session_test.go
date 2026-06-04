@@ -6,6 +6,7 @@ import (
 	"time"
 
 	ocibastion "github.com/oracle/oci-go-sdk/v65/bastion"
+	"github.com/oracle/oci-go-sdk/v65/common"
 )
 
 // fakeClient stands in for the OCI BastionClient. It records the create
@@ -191,6 +192,40 @@ func TestAlive_FalseWhenSessionGone(t *testing.T) {
 	if s.Alive(context.Background()) {
 		t.Error("Alive = true for a DELETED session, want false")
 	}
+}
+
+// Deadline must be the session's created-at plus the 3h TTL, the boundary the
+// supervisor's proactive rebuild watches.
+func TestDeadline_IsCreatedAtPlusTTL(t *testing.T) {
+	created := time.Date(2026, 6, 4, 9, 0, 0, 0, time.UTC)
+	fake := &fakeClientWithCreated{
+		fakeClient: fakeClient{states: []ocibastion.SessionLifecycleStateEnum{ocibastion.SessionLifecycleStateActive}},
+		created:    created,
+	}
+	s, err := Open(context.Background(), fake, testParams())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	want := created.Add(MaxTTLSeconds * time.Second)
+	if !s.Deadline().Equal(want) {
+		t.Errorf("Deadline = %v, want created-at + TTL = %v", s.Deadline(), want)
+	}
+}
+
+// fakeClientWithCreated extends fakeClient to stamp a TimeCreated on the ACTIVE
+// session, so the deadline computation has a real created-at to read.
+type fakeClientWithCreated struct {
+	fakeClient
+	created time.Time
+}
+
+func (f *fakeClientWithCreated) GetSession(ctx context.Context, req ocibastion.GetSessionRequest) (ocibastion.GetSessionResponse, error) {
+	resp, err := f.fakeClient.GetSession(ctx, req)
+	if err != nil {
+		return resp, err
+	}
+	resp.Session.TimeCreated = &common.SDKTime{Time: f.created}
+	return resp, nil
 }
 
 func TestClose_DeletesSession(t *testing.T) {

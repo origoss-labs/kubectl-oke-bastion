@@ -1,11 +1,168 @@
 package kubeconfig
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 
 	"k8s.io/client-go/tools/clientcmd"
 )
+
+// A second OKE kubeconfig blob as CreateKubeconfig would return, with a
+// distinct cluster/context/user, used to prove a merge preserves unrelated
+// entries.
+const mergeBlobOther = `apiVersion: v1
+kind: Config
+current-context: ctx-other
+clusters:
+- name: cluster-other
+  cluster:
+    server: https://10.0.1.9:6443
+    certificate-authority-data: b3RoZXItY2E=
+contexts:
+- name: ctx-other
+  context:
+    cluster: cluster-other
+    user: user-other
+users:
+- name: user-other
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1beta1
+      command: oci
+      args:
+      - ce
+      - cluster
+      - generate-token
+      - --cluster-id
+      - ocid1.cluster.oc1.eu-frankfurt-1.bbbb
+      - --region
+      - eu-frankfurt-1
+`
+
+// A blob that reuses the same names as okeKubeconfig but with a changed server,
+// used to prove a same-named entry is overwritten, not duplicated.
+const mergeBlobSameNameNewServer = `apiVersion: v1
+kind: Config
+current-context: ctx-abc
+clusters:
+- name: cluster-abc
+  cluster:
+    server: https://10.9.9.9:6443
+    certificate-authority-data: ZmFrZS1jYQ==
+contexts:
+- name: ctx-abc
+  context:
+    cluster: cluster-abc
+    user: user-abc
+users:
+- name: user-abc
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1beta1
+      command: oci
+      args:
+      - ce
+      - cluster
+      - generate-token
+      - --cluster-id
+      - ocid1.cluster.oc1.eu-frankfurt-1.aaaa
+      - --region
+      - eu-frankfurt-1
+`
+
+func TestMergeKubeconfig_CreatesMissingFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "kube", "config") // dir does not exist yet
+	if err := MergeKubeconfig(path, []byte(okeKubeconfig)); err != nil {
+		t.Fatalf("MergeKubeconfig into a missing file: %v", err)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("merged file not created: %v", err)
+	}
+	cfg, err := clientcmd.Load(raw)
+	if err != nil {
+		t.Fatalf("merged file is not a valid kubeconfig: %v", err)
+	}
+	if _, ok := cfg.Contexts["ctx-abc"]; !ok {
+		t.Error("merged file is missing the blob's context")
+	}
+}
+
+func TestMergeKubeconfig_PreservesExistingEntries(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config")
+	// Seed the target with an unrelated cluster.
+	seed, err := clientcmd.Load([]byte(okeKubeconfig))
+	if err != nil {
+		t.Fatalf("loading seed: %v", err)
+	}
+	if err := clientcmd.WriteToFile(*seed, path); err != nil {
+		t.Fatalf("writing seed: %v", err)
+	}
+
+	if err := MergeKubeconfig(path, []byte(mergeBlobOther)); err != nil {
+		t.Fatalf("MergeKubeconfig: %v", err)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading merged: %v", err)
+	}
+	cfg, err := clientcmd.Load(raw)
+	if err != nil {
+		t.Fatalf("loading merged: %v", err)
+	}
+	// Both the pre-existing and the newly merged entries must be present.
+	if _, ok := cfg.Contexts["ctx-abc"]; !ok {
+		t.Error("pre-existing context ctx-abc was dropped by the merge")
+	}
+	if _, ok := cfg.Contexts["ctx-other"]; !ok {
+		t.Error("merged context ctx-other is missing")
+	}
+	if _, ok := cfg.Clusters["cluster-other"]; !ok {
+		t.Error("merged cluster cluster-other is missing")
+	}
+	if _, ok := cfg.AuthInfos["user-other"]; !ok {
+		t.Error("merged user user-other is missing")
+	}
+}
+
+func TestMergeKubeconfig_OverwritesSameNamedEntries(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config")
+	seed, err := clientcmd.Load([]byte(okeKubeconfig))
+	if err != nil {
+		t.Fatalf("loading seed: %v", err)
+	}
+	if err := clientcmd.WriteToFile(*seed, path); err != nil {
+		t.Fatalf("writing seed: %v", err)
+	}
+
+	if err := MergeKubeconfig(path, []byte(mergeBlobSameNameNewServer)); err != nil {
+		t.Fatalf("MergeKubeconfig: %v", err)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading merged: %v", err)
+	}
+	cfg, err := clientcmd.Load(raw)
+	if err != nil {
+		t.Fatalf("loading merged: %v", err)
+	}
+	// Exactly one cluster of that name, and it carries the new server.
+	if n := len(cfg.Clusters); n != 1 {
+		t.Errorf("cluster count = %d, want 1 (same-named must be overwritten, not duplicated)", n)
+	}
+	cl, ok := cfg.Clusters["cluster-abc"]
+	if !ok {
+		t.Fatal("cluster-abc missing after overwrite")
+	}
+	if cl.Server != "https://10.9.9.9:6443" {
+		t.Errorf("cluster-abc Server = %q, want the merged-in server", cl.Server)
+	}
+}
 
 func TestAddBastionContext_LeavesOriginalUntouched(t *testing.T) {
 	cfg, err := clientcmd.Load([]byte(okeKubeconfig))
@@ -418,5 +575,66 @@ func TestParse_OKEContext(t *testing.T) {
 	}
 	if got != want {
 		t.Errorf("Parse() = %+v, want %+v", got, want)
+	}
+}
+
+// twoContextKubeconfig has two OKE contexts and a current-context that is
+// neither of the ones the daemon would target — proving InfoForContext keys off
+// the named context, not current-context.
+const twoContextKubeconfig = `apiVersion: v1
+kind: Config
+current-context: ctx-one
+clusters:
+- name: cluster-one
+  cluster:
+    server: https://10.0.0.1:6443
+    certificate-authority-data: ZmFrZS1jYQ==
+- name: cluster-two
+  cluster:
+    server: https://10.0.0.2:6443
+    certificate-authority-data: ZmFrZS1jYQ==
+contexts:
+- name: ctx-one
+  context:
+    cluster: cluster-one
+    user: user-one
+- name: ctx-two
+  context:
+    cluster: cluster-two
+    user: user-two
+users:
+- name: user-one
+  user:
+    exec:
+      command: oci
+      args: [ce, cluster, generate-token, --cluster-id, ocid1.cluster.oc1..one, --region, eu-frankfurt-1]
+- name: user-two
+  user:
+    exec:
+      command: oci
+      args: [ce, cluster, generate-token, --cluster-id, ocid1.cluster.oc1..two, --region, us-ashburn-1]
+`
+
+func TestParseContext_NamedContextWins(t *testing.T) {
+	// Ask for ctx-two even though current-context is ctx-one: the daemon resolves
+	// facts for the configured kube context, not whichever one is current.
+	got, err := ParseContext([]byte(twoContextKubeconfig), "ctx-two")
+	if err != nil {
+		t.Fatalf("ParseContext returned error: %v", err)
+	}
+	want := ClusterInfo{
+		ContextName:     "ctx-two",
+		PrivateEndpoint: "10.0.0.2",
+		ClusterOCID:     "ocid1.cluster.oc1..two",
+		Region:          "us-ashburn-1",
+	}
+	if got != want {
+		t.Errorf("ParseContext(ctx-two) = %+v, want %+v", got, want)
+	}
+}
+
+func TestParseContext_UnknownContextErrors(t *testing.T) {
+	if _, err := ParseContext([]byte(twoContextKubeconfig), "ctx-nope"); err == nil {
+		t.Fatal("expected an error for an unknown context name, got nil")
 	}
 }
